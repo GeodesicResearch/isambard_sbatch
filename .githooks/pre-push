@@ -1,0 +1,26 @@
+#!/bin/bash
+# Pre-push hook: runs the isambard_sbatch test suite before allowing a push.
+# If tests fail, the push is aborted.
+
+set -euo pipefail
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+TEST_SCRIPT="$REPO_DIR/tests/run_tests.sh"
+
+if [[ ! -x "$TEST_SCRIPT" ]]; then
+    echo "pre-push: test script not found at $TEST_SCRIPT" >&2
+    exit 1
+fi
+
+echo "pre-push: running isambard_sbatch tests..."
+echo ""
+
+if ! bash "$TEST_SCRIPT"; then
+    echo "" >&2
+    echo "pre-push: TESTS FAILED — push aborted" >&2
+    echo "Fix the failing tests and try again." >&2
+    exit 1
+fi
+
+echo ""
+echo "pre-push: all tests passed"

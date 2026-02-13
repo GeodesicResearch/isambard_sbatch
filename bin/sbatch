@@ -1,0 +1,4 @@
+#!/bin/bash
+# Wrapper that shadows the real sbatch, routing all calls through isambard_sbatch.
+# This file should be placed in a directory that appears before /usr/bin in PATH.
+exec "$(dirname "$0")/isambard_sbatch" "$@"

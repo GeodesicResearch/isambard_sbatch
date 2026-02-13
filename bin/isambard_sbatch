@@ -1,0 +1,339 @@
+#!/bin/bash
+# isambard_sbatch - A wrapper around sbatch that enforces project-wide node limits
+#
+# Checks total node usage (running + pending) across all users in a SLURM
+# account before allowing submission. Blocks if the project would exceed
+# the configured maximum.
+#
+# Environment variables:
+#   SAFE_SBATCH_MAX_NODES  - Max nodes for the account (default: 99)
+#   SAFE_SBATCH_ACCOUNT    - SLURM account to check (default: brics.a5k)
+#   SAFE_SBATCH_DRY_RUN    - If 1, print what would happen without submitting
+#   SAFE_SBATCH_FORCE      - If 1, bypass the check entirely
+#   SAFE_SBATCH_DISABLED   - If 1, pass through to real sbatch (no checking)
+
+set -euo pipefail
+
+MAX_NODES="${SAFE_SBATCH_MAX_NODES:-99}"
+ACCOUNT="${SAFE_SBATCH_ACCOUNT:-brics.a5k}"
+DRY_RUN="${SAFE_SBATCH_DRY_RUN:-0}"
+FORCE="${SAFE_SBATCH_FORCE:-0}"
+DISABLED="${SAFE_SBATCH_DISABLED:-0}"
+
+# Find the real sbatch binary, skipping our own directory
+find_real_sbatch() {
+    local our_dir
+    our_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local IFS=':'
+    for dir in $PATH; do
+        if [[ "$dir" != "$our_dir" && -x "$dir/sbatch" ]]; then
+            echo "$dir/sbatch"
+            return
+        fi
+    done
+    # Fallback to known location
+    if [[ -x /usr/bin/sbatch ]]; then
+        echo "/usr/bin/sbatch"
+        return
+    fi
+    echo ""
+}
+
+REAL_SBATCH="$(find_real_sbatch)"
+if [[ -z "$REAL_SBATCH" ]]; then
+    echo "isambard_sbatch: error: real sbatch not found in PATH" >&2
+    exit 127
+fi
+
+# Parse requested node count from command-line arguments.
+# Returns the node count or empty string if not specified.
+parse_nodes_from_args() {
+    local nodes=""
+    local i=0
+    local args=("$@")
+
+    while [[ $i -lt ${#args[@]} ]]; do
+        case "${args[$i]}" in
+            --nodes=*)
+                nodes="${args[$i]#--nodes=}"
+                ;;
+            --nodes|-N)
+                i=$((i + 1))
+                if [[ $i -lt ${#args[@]} ]]; then
+                    nodes="${args[$i]}"
+                fi
+                ;;
+            -N[0-9]*)
+                nodes="${args[$i]#-N}"
+                ;;
+        esac
+        i=$((i + 1))
+    done
+
+    echo "$nodes"
+}
+
+# Parse requested node count from #SBATCH directives in a batch script.
+# Uses the last occurrence (matching real sbatch behavior).
+parse_nodes_from_script() {
+    local script="$1"
+    if [[ ! -f "$script" ]]; then
+        echo ""
+        return
+    fi
+
+    local nodes=""
+    while IFS= read -r line; do
+        # Strip leading whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in
+            "#SBATCH --nodes="*)
+                nodes="${line#*--nodes=}"
+                nodes="${nodes%% *}"
+                ;;
+            "#SBATCH -N "*)
+                nodes="${line#*-N }"
+                nodes="${nodes%% *}"
+                ;;
+            "#SBATCH -N"[0-9]*)
+                local rest="${line#*-N}"
+                rest="${rest%% *}"
+                if [[ "$rest" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+                    nodes="$rest"
+                fi
+                ;;
+        esac
+    done < "$script"
+
+    echo "$nodes"
+}
+
+# Find the batch script file from arguments.
+# The script is the first positional argument (non-option).
+find_script_file() {
+    local i=0
+    local args=("$@")
+
+    # Options that consume the next argument as a value
+    local -A opts_with_value=(
+        [--nodes]=1 [--ntasks]=1 [--cpus-per-task]=1 [--mem]=1 [--time]=1
+        [--partition]=1 [--output]=1 [--error]=1 [--job-name]=1 [--account]=1
+        [--dependency]=1 [--gres]=1 [--constraint]=1 [--mem-per-cpu]=1
+        [--mem-per-gpu]=1 [--gpus]=1 [--gpus-per-node]=1 [--gpus-per-task]=1
+        [--begin]=1 [--deadline]=1 [--signal]=1 [--mail-type]=1 [--mail-user]=1
+        [--reservation]=1 [--nodefile]=1 [--exclude]=1 [--nice]=1 [--priority]=1
+        [--qos]=1 [--wckey]=1 [--licenses]=1 [--clusters]=1 [--comment]=1
+        [--distribution]=1 [--export]=1 [--extra-node-info]=1 [--hint]=1
+        [--mcs-label]=1 [--network]=1 [--open-mode]=1 [--power]=1
+        [--profile]=1 [--propagate]=1 [--switches]=1 [--thread-spec]=1
+        [--tmp]=1 [--wait-all-nodes]=1 [--chdir]=1 [--workdir]=1 [--wrap]=1
+        [-N]=1 [-n]=1 [-c]=1 [-p]=1 [-t]=1 [-o]=1 [-e]=1 [-J]=1 [-A]=1
+        [-w]=1 [-x]=1 [-D]=1 [-d]=1
+    )
+
+    while [[ $i -lt ${#args[@]} ]]; do
+        local arg="${args[$i]}"
+        case "$arg" in
+            --*=*)
+                # --option=value, no next arg consumed
+                ;;
+            --*)
+                # Check if this long option takes a value
+                if [[ -n "${opts_with_value[$arg]+x}" ]]; then
+                    i=$((i + 1))  # skip the value
+                fi
+                ;;
+            -[A-Za-z])
+                # Single short option like -N, -p, etc.
+                if [[ -n "${opts_with_value[$arg]+x}" ]]; then
+                    i=$((i + 1))  # skip the value
+                fi
+                ;;
+            -[A-Za-z]*)
+                # Short option with value attached (-N4, -J name), skip
+                ;;
+            *)
+                # First positional argument — this is the script
+                echo "$arg"
+                return
+                ;;
+        esac
+        i=$((i + 1))
+    done
+
+    echo ""
+}
+
+# Resolve node ranges (e.g., "2-4") to the maximum value.
+resolve_node_count() {
+    local nodes="$1"
+    if [[ "$nodes" == *-* ]]; then
+        echo "${nodes##*-}"
+    else
+        echo "$nodes"
+    fi
+}
+
+# Get current node usage (running + pending) for the configured account.
+get_current_nodes() {
+    squeue -A "$ACCOUNT" -h -t RUNNING,PENDING -o "%D" 2>/dev/null \
+        | awk '{sum+=$1} END {print sum+0}'
+}
+
+# Get per-user node breakdown for the configured account.
+# Output: one line per user, sorted by node count descending.
+#   "username  <running_nodes>R  <pending_nodes>P  <total_nodes> total"
+get_per_user_breakdown() {
+    squeue -A "$ACCOUNT" -h -t RUNNING,PENDING -o "%u %D %T" 2>/dev/null \
+        | awk '
+    {
+        user = $1; nodes = $2; state = $3
+        total[user] += nodes
+        if (state == "RUNNING") running[user] += nodes
+        else pending[user] += nodes
+    }
+    END {
+        # Sort by total descending (collect into arrays, bubble sort)
+        n = 0
+        for (u in total) { n++; users[n] = u; tots[n] = total[u] }
+        for (i = 1; i <= n; i++)
+            for (j = i + 1; j <= n; j++)
+                if (tots[j] > tots[i]) {
+                    tmp = tots[i]; tots[i] = tots[j]; tots[j] = tmp
+                    tmp = users[i]; users[i] = users[j]; users[j] = tmp
+                }
+        for (i = 1; i <= n; i++) {
+            u = users[i]
+            r = running[u] + 0
+            p = pending[u] + 0
+            t = total[u]
+            printf "    %-20s  %4dR  %4dP  %4d total\n", u, r, p, t
+        }
+    }'
+}
+
+# Print a compact cluster + account summary to stderr.
+print_cluster_summary() {
+    local current_nodes="$1"
+    local requested_nodes="$2"
+
+    # Cluster-wide node counts by state
+    local cluster_stats
+    cluster_stats=$(sinfo -o "%T %D %G" --noheader 2>/dev/null | awk '
+    {
+        state = $1; nodes = $2; gres = $3
+        gpus_per_node = 4
+        if (match(gres, /gpu:([0-9]+)/, arr)) gpus_per_node = arr[1]
+        state_nodes[state] += nodes
+        state_gpus[state] += nodes * gpus_per_node
+        total_nodes += nodes
+        total_gpus += nodes * gpus_per_node
+    }
+    END {
+        alloc = state_nodes["allocated"] + state_nodes["mixed"] + state_nodes["completing"] + 0
+        alloc_gpus = state_gpus["allocated"] + state_gpus["mixed"] + state_gpus["completing"] + 0
+        idle_n = state_nodes["idle"] + 0
+        idle_g = state_gpus["idle"] + 0
+        down_n = state_nodes["down"] + state_nodes["drained"] + state_nodes["draining"] + state_nodes["down*"] + state_nodes["drain"] + 0
+        down_g = state_gpus["down"] + state_gpus["drained"] + state_gpus["draining"] + state_gpus["down*"] + state_gpus["drain"] + 0
+        printf "%d %d %d %d %d %d %d %d", total_nodes, total_gpus, alloc, alloc_gpus, idle_n, idle_g, down_n, down_g
+    }')
+
+    local total_nodes total_gpus alloc_nodes alloc_gpus idle_nodes idle_gpus down_nodes down_gpus
+    read -r total_nodes total_gpus alloc_nodes alloc_gpus idle_nodes idle_gpus down_nodes down_gpus <<< "$cluster_stats"
+
+    local headroom=$((MAX_NODES - current_nodes))
+    if [[ $headroom -lt 0 ]]; then headroom=0; fi
+    local after_submit=$((current_nodes + requested_nodes))
+
+    echo "──────────────────────────────────────────────────────────────────" >&2
+    echo "  Cluster:  ${alloc_nodes} allocated, ${idle_nodes} idle, ${down_nodes} down  (${total_nodes} nodes / ${total_gpus} GPUs)" >&2
+    echo "  Account:  ${current_nodes} nodes used by $ACCOUNT  (limit: $MAX_NODES, headroom: $headroom)" >&2
+
+    local breakdown
+    breakdown=$(get_per_user_breakdown)
+    if [[ -n "$breakdown" ]]; then
+        echo "$breakdown" >&2
+    fi
+
+    echo "  Request:  +${requested_nodes} nodes  →  ${after_submit}/${MAX_NODES}" >&2
+    echo "──────────────────────────────────────────────────────────────────" >&2
+}
+
+main() {
+    # Pass through immediately if disabled
+    if [[ "$DISABLED" == "1" ]]; then
+        exec "$REAL_SBATCH" "$@"
+    fi
+
+    # Pass through if forced
+    if [[ "$FORCE" == "1" ]]; then
+        if [[ "$DRY_RUN" == "1" ]]; then
+            echo "[DRY RUN] [FORCED] Would submit: $REAL_SBATCH $*"
+            exit 0
+        fi
+        exec "$REAL_SBATCH" "$@"
+    fi
+
+    # Parse requested nodes from CLI args (CLI overrides script directives)
+    local requested_nodes
+    requested_nodes=$(parse_nodes_from_args "$@")
+
+    # If not specified on CLI, check the batch script
+    if [[ -z "$requested_nodes" ]]; then
+        local script_file
+        script_file=$(find_script_file "$@")
+        if [[ -n "$script_file" ]]; then
+            requested_nodes=$(parse_nodes_from_script "$script_file")
+        fi
+    fi
+
+    # Default to 1 node if not specified anywhere
+    requested_nodes="${requested_nodes:-1}"
+
+    # Handle node ranges
+    requested_nodes=$(resolve_node_count "$requested_nodes")
+
+    # Validate that requested_nodes is a number
+    if ! [[ "$requested_nodes" =~ ^[0-9]+$ ]]; then
+        echo "isambard_sbatch: warning: could not parse node count '$requested_nodes', defaulting to 1" >&2
+        requested_nodes=1
+    fi
+
+    # Get current usage for the account
+    local current_nodes
+    current_nodes=$(get_current_nodes)
+
+    local total=$((current_nodes + requested_nodes))
+
+    # Always print cluster summary
+    print_cluster_summary "$current_nodes" "$requested_nodes"
+
+    if [[ $total -gt $MAX_NODES ]]; then
+        echo "" >&2
+        echo "  BLOCKED — would exceed project node limit ($total > $MAX_NODES)" >&2
+        echo "" >&2
+        echo "  To proceed, either:" >&2
+        echo "    - Wait for existing jobs to complete or cancel pending ones" >&2
+        echo "    - Increase limit: export SAFE_SBATCH_MAX_NODES=<N>" >&2
+        echo "    - Force this submission: SAFE_SBATCH_FORCE=1 isambard_sbatch ..." >&2
+        echo "" >&2
+        exit 1
+    fi
+
+    # Dry run: report what would happen
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo "[DRY RUN] Would submit: $REAL_SBATCH $*" >&2
+        exit 0
+    fi
+
+    # All checks passed — submit
+    exec "$REAL_SBATCH" "$@"
+}
+
+# Allow sourcing for unit tests
+if [[ "${1:-}" == "--source-only" ]]; then
+    return 0 2>/dev/null || true
+else
+    main "$@"
+fi
