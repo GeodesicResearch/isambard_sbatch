@@ -46,12 +46,18 @@ Running `install.sh` multiple times is safe — it detects an existing installat
 
 ### Install for Other Users
 
-Each user who wants the node cap should copy the `isambard_sbatch` directory to their home and run the installer:
+Each user who wants the node cap should clone the repo to their home and run the installer:
 
 ```bash
-cp -r /home/a5k/kyleobrien.a5k/isambard_sbatch ~/isambard_sbatch
+git clone https://github.com/GeodesicResearch/isambard_sbatch.git ~/isambard_sbatch
 bash ~/isambard_sbatch/install.sh
 source ~/.bashrc
+```
+
+To update to the latest version:
+
+```bash
+cd ~/isambard_sbatch && git pull
 ```
 
 The installer resolves paths relative to wherever it's run from, so each user's `.bashrc` will point to their own copy.
@@ -113,7 +119,7 @@ All settings are environment variables. Set them in `.bashrc` for persistence or
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAFE_SBATCH_MAX_NODES` | `99` | Maximum total nodes (running + pending) for the account |
+| `SAFE_SBATCH_MAX_NODES` | `256` | Maximum total nodes (running + pending) for the account |
 | `SAFE_SBATCH_ACCOUNT` | `brics.a5k` | SLURM account to monitor via `squeue -A` |
 | `SAFE_SBATCH_FORCE` | `0` | Set to `1` to bypass the limit check for a single submission |
 | `SAFE_SBATCH_DISABLED` | `0` | Set to `1` to disable entirely (pass straight through to real sbatch) |
@@ -147,7 +153,7 @@ The `--check` flag performs a lightweight node-limit check without submitting a 
 ```bash
 # Manual check
 isambard_sbatch --check
-# Output (stderr): isambard_sbatch --check: OK — account=brics.a5k using 42/99 nodes
+# Output (stderr): isambard_sbatch --check: OK — account=brics.a5k using 42/256 nodes
 
 # Use in an sbatch script (guard snippet)
 if ! command -v isambard_sbatch &>/dev/null; then
