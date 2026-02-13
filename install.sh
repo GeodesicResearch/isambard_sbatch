@@ -7,7 +7,7 @@
 # 1. Makes scripts executable
 # 2. Adds ~/isambard_sbatch/bin to PATH (prepended, so it shadows /usr/bin/sbatch)
 # 3. Adds a convenience alias for interactive shells
-# 4. Sets default SAFE_SBATCH_MAX_NODES if not already configured
+# 4. Sets default ISAMBARD_SBATCH_MAX_NODES if not already configured
 # 5. Configures git hooks for development
 
 set -euo pipefail
@@ -49,8 +49,8 @@ else
 $MARKER — begin
 export PATH="$BIN_DIR:\$PATH"
 alias sbatch='isambard_sbatch'
-export SAFE_SBATCH_MAX_NODES="\${SAFE_SBATCH_MAX_NODES:-256}"
-export SAFE_SBATCH_ACCOUNT="\${SAFE_SBATCH_ACCOUNT:-brics.a5k}"
+export ISAMBARD_SBATCH_MAX_NODES="\${ISAMBARD_SBATCH_MAX_NODES:-256}"
+export ISAMBARD_SBATCH_ACCOUNT="\${ISAMBARD_SBATCH_ACCOUNT:-brics.a5k}"
 $MARKER — end
 EOF
     echo "  Added to $SHELL_RC"
@@ -62,7 +62,7 @@ echo ""
 echo "  source $SHELL_RC"
 echo ""
 echo "Configuration (set in your shell or $SHELL_RC):"
-echo "  SAFE_SBATCH_MAX_NODES  — max nodes for the project (default: 256)"
-echo "  SAFE_SBATCH_ACCOUNT    — SLURM account to check (default: brics.a5k)"
+echo "  ISAMBARD_SBATCH_MAX_NODES  — max nodes for the project (default: 256)"
+echo "  ISAMBARD_SBATCH_ACCOUNT    — SLURM account to check (default: brics.a5k)"
 echo ""
 echo "Both 'sbatch' and 'isambard_sbatch' will now enforce the node limit."

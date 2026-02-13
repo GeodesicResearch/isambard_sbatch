@@ -36,7 +36,7 @@ The installer:
 1. Makes `bin/isambard_sbatch` and `bin/sbatch` executable
 2. Prepends `~/isambard_sbatch/bin` to `$PATH` in your `.bashrc` (or `.bash_profile` / `.zshrc`)
 3. Adds an `alias sbatch='isambard_sbatch'` for interactive shells
-4. Sets default values for `SAFE_SBATCH_MAX_NODES` and `SAFE_SBATCH_ACCOUNT`
+4. Sets default values for `ISAMBARD_SBATCH_MAX_NODES` and `ISAMBARD_SBATCH_ACCOUNT`
 
 After installation, both `sbatch` and `isambard_sbatch` route through the wrapper. The real `sbatch` (at `/usr/bin/sbatch`) is called automatically once the limit check passes.
 
@@ -97,15 +97,15 @@ If the project would exceed the configured cap, the submission is rejected with 
 ══════════════════════════════════════════════════════════════════
 
   Account:         brics.a5k
-  Max nodes:       256  ($SAFE_SBATCH_MAX_NODES)
+  Max nodes:       256  ($ISAMBARD_SBATCH_MAX_NODES)
   Currently used:  120 nodes (running + pending)
   Requested:       16 nodes
   Would total:     136 nodes
 
   To proceed, either:
     - Wait for existing jobs to complete or cancel pending ones
-    - Increase limit: export SAFE_SBATCH_MAX_NODES=<N>
-    - Force this submission: SAFE_SBATCH_FORCE=1 isambard_sbatch ...
+    - Increase limit: export ISAMBARD_SBATCH_MAX_NODES=<N>
+    - Force this submission: ISAMBARD_SBATCH_FORCE=1 isambard_sbatch ...
 ══════════════════════════════════════════════════════════════════
 ```
 
@@ -117,29 +117,29 @@ All settings are environment variables. Set them in `.bashrc` for persistence or
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAFE_SBATCH_MAX_NODES` | `256` | Maximum total nodes (running + pending) for the account |
-| `SAFE_SBATCH_ACCOUNT` | `brics.a5k` | SLURM account to monitor via `squeue -A` |
-| `SAFE_SBATCH_FORCE` | `0` | Set to `1` to bypass the limit check for a single submission |
-| `SAFE_SBATCH_DISABLED` | `0` | Set to `1` to disable entirely (pass straight through to real sbatch) |
-| `SAFE_SBATCH_DRY_RUN` | `0` | Set to `1` to preview what would happen without actually submitting |
+| `ISAMBARD_SBATCH_MAX_NODES` | `256` | Maximum total nodes (running + pending) for the account |
+| `ISAMBARD_SBATCH_ACCOUNT` | `brics.a5k` | SLURM account to monitor via `squeue -A` |
+| `ISAMBARD_SBATCH_FORCE` | `0` | Set to `1` to bypass the limit check for a single submission |
+| `ISAMBARD_SBATCH_DISABLED` | `0` | Set to `1` to disable entirely (pass straight through to real sbatch) |
+| `ISAMBARD_SBATCH_DRY_RUN` | `0` | Set to `1` to preview what would happen without actually submitting |
 
 ### Examples
 
 ```bash
 # Override the cap (persistent — add to .bashrc)
-export SAFE_SBATCH_MAX_NODES=128
+export ISAMBARD_SBATCH_MAX_NODES=128
 
 # Change which SLURM account is monitored
-export SAFE_SBATCH_ACCOUNT=brics.a5k
+export ISAMBARD_SBATCH_ACCOUNT=brics.a5k
 
 # Force a single submission past the limit
-SAFE_SBATCH_FORCE=1 isambard_sbatch --nodes=64 big_job.sbatch
+ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 big_job.sbatch
 
 # Disable for the rest of this shell session
-export SAFE_SBATCH_DISABLED=1
+export ISAMBARD_SBATCH_DISABLED=1
 
 # Preview the limit check without submitting
-SAFE_SBATCH_DRY_RUN=1 isambard_sbatch --nodes=16 config.sbatch
+ISAMBARD_SBATCH_DRY_RUN=1 isambard_sbatch --nodes=16 config.sbatch
 # Output: [DRY RUN] Would submit: /usr/bin/sbatch --nodes=16 config.sbatch
 #         [DRY RUN] Account=brics.a5k  Current=31  Requested=16  Max=256  Total=47
 ```
@@ -165,10 +165,10 @@ fi
 
 **Behavior:**
 - Queries current account-wide node usage (running + pending)
-- If `current > SAFE_SBATCH_MAX_NODES`: prints `BLOCKED`, exits 1
+- If `current > ISAMBARD_SBATCH_MAX_NODES`: prints `BLOCKED`, exits 1
 - If under: prints `OK`, exits 0
-- Respects `SAFE_SBATCH_FORCE` (exits 0 when forced)
-- **Ignores** `SAFE_SBATCH_DISABLED` — the guard is a separate defense layer from the wrapper's pass-through mode
+- Respects `ISAMBARD_SBATCH_FORCE` (exits 0 when forced)
+- **Ignores** `ISAMBARD_SBATCH_DISABLED` — the guard is a separate defense layer from the wrapper's pass-through mode
 - Does **not** invoke sbatch, does **not** parse node arguments
 
 ### Guard Snippet
@@ -199,7 +199,7 @@ On every `isambard_sbatch` invocation:
 
 2. **Query current account usage.** Runs `squeue -A <account> -t RUNNING,PENDING` and sums the node counts across all users in the account. Both running and pending jobs are counted, since pending jobs represent committed allocations that will use nodes once resources are available.
 
-3. **Enforce the limit.** If `current_nodes + requested_nodes > SAFE_SBATCH_MAX_NODES`, the submission is blocked (exit code 1) with a diagnostic message.
+3. **Enforce the limit.** If `current_nodes + requested_nodes > ISAMBARD_SBATCH_MAX_NODES`, the submission is blocked (exit code 1) with a diagnostic message.
 
 4. **Pass through to real sbatch.** If the check passes, `exec /usr/bin/sbatch "$@"` is called with all original arguments, so the behavior is identical to calling sbatch directly.
 
@@ -276,12 +276,12 @@ The test suite includes:
 - Dry-run submissions that pass the limit check
 - Dry-run submissions that are correctly blocked
 - Blocking at exact capacity boundary
-- Force bypass (`SAFE_SBATCH_FORCE=1`)
-- Disabled mode passthrough (`SAFE_SBATCH_DISABLED=1`)
+- Force bypass (`ISAMBARD_SBATCH_FORCE=1`)
+- Disabled mode passthrough (`ISAMBARD_SBATCH_DISABLED=1`)
 - Real job submission and cancellation
 - The `sbatch` wrapper delegates to `isambard_sbatch`
 - `--check` returns 0 when under limit, 1 when over
-- `--check` respects `SAFE_SBATCH_FORCE` but ignores `SAFE_SBATCH_DISABLED`
+- `--check` respects `ISAMBARD_SBATCH_FORCE` but ignores `ISAMBARD_SBATCH_DISABLED`
 - `--check` does not invoke sbatch
 
 ## Troubleshooting
@@ -307,13 +307,13 @@ scancel <job_id>
 ### I need to bypass the limit just once
 
 ```bash
-SAFE_SBATCH_FORCE=1 isambard_sbatch --nodes=64 urgent_job.sbatch
+ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 urgent_job.sbatch
 ```
 
 ### I want to disable isambard_sbatch for a session without uninstalling
 
 ```bash
-export SAFE_SBATCH_DISABLED=1
+export ISAMBARD_SBATCH_DISABLED=1
 # All sbatch calls now go straight to /usr/bin/sbatch
 ```
 
@@ -328,5 +328,5 @@ sacctmgr show assoc where user=$USER format=Account%20 -n
 Then set the correct one:
 
 ```bash
-export SAFE_SBATCH_ACCOUNT=brics.a5k
+export ISAMBARD_SBATCH_ACCOUNT=brics.a5k
 ```

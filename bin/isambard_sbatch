@@ -6,19 +6,19 @@
 # the configured maximum.
 #
 # Environment variables:
-#   SAFE_SBATCH_MAX_NODES  - Max nodes for the account (default: 99)
-#   SAFE_SBATCH_ACCOUNT    - SLURM account to check (default: brics.a5k)
-#   SAFE_SBATCH_DRY_RUN    - If 1, print what would happen without submitting
-#   SAFE_SBATCH_FORCE      - If 1, bypass the check entirely
-#   SAFE_SBATCH_DISABLED   - If 1, pass through to real sbatch (no checking)
+#   ISAMBARD_SBATCH_MAX_NODES  - Max nodes for the account (default: 99)
+#   ISAMBARD_SBATCH_ACCOUNT    - SLURM account to check (default: brics.a5k)
+#   ISAMBARD_SBATCH_DRY_RUN    - If 1, print what would happen without submitting
+#   ISAMBARD_SBATCH_FORCE      - If 1, bypass the check entirely
+#   ISAMBARD_SBATCH_DISABLED   - If 1, pass through to real sbatch (no checking)
 
 set -euo pipefail
 
-MAX_NODES="${SAFE_SBATCH_MAX_NODES:-256}"
-ACCOUNT="${SAFE_SBATCH_ACCOUNT:-brics.a5k}"
-DRY_RUN="${SAFE_SBATCH_DRY_RUN:-0}"
-FORCE="${SAFE_SBATCH_FORCE:-0}"
-DISABLED="${SAFE_SBATCH_DISABLED:-0}"
+MAX_NODES="${ISAMBARD_SBATCH_MAX_NODES:-256}"
+ACCOUNT="${ISAMBARD_SBATCH_ACCOUNT:-brics.a5k}"
+DRY_RUN="${ISAMBARD_SBATCH_DRY_RUN:-0}"
+FORCE="${ISAMBARD_SBATCH_FORCE:-0}"
+DISABLED="${ISAMBARD_SBATCH_DISABLED:-0}"
 
 # Find the real sbatch binary, skipping our own directory
 find_real_sbatch() {
@@ -263,7 +263,7 @@ print_cluster_summary() {
 check_mode() {
     # Lightweight check: is the account currently over the node limit?
     # Used by in-script guards to abort jobs submitted via raw /usr/bin/sbatch.
-    # Respects SAFE_SBATCH_FORCE but ignores SAFE_SBATCH_DISABLED (separate defense layer).
+    # Respects ISAMBARD_SBATCH_FORCE but ignores ISAMBARD_SBATCH_DISABLED (separate defense layer).
 
     if [[ "$FORCE" == "1" ]]; then
         echo "isambard_sbatch --check: OK (forced) — account=$ACCOUNT, limit=$MAX_NODES" >&2
@@ -275,7 +275,7 @@ check_mode() {
 
     if [[ $current_nodes -gt $MAX_NODES ]]; then
         echo "isambard_sbatch --check: BLOCKED — account=$ACCOUNT using $current_nodes nodes (limit: $MAX_NODES)" >&2
-        echo "  Cancel pending jobs or raise SAFE_SBATCH_MAX_NODES to unblock." >&2
+        echo "  Cancel pending jobs or raise ISAMBARD_SBATCH_MAX_NODES to unblock." >&2
         exit 1
     fi
 
@@ -338,8 +338,8 @@ main() {
         echo "" >&2
         echo "  To proceed, either:" >&2
         echo "    - Wait for existing jobs to complete or cancel pending ones" >&2
-        echo "    - Increase limit: export SAFE_SBATCH_MAX_NODES=<N>" >&2
-        echo "    - Force this submission: SAFE_SBATCH_FORCE=1 isambard_sbatch ..." >&2
+        echo "    - Increase limit: export ISAMBARD_SBATCH_MAX_NODES=<N>" >&2
+        echo "    - Force this submission: ISAMBARD_SBATCH_FORCE=1 isambard_sbatch ..." >&2
         echo "" >&2
         exit 1
     fi

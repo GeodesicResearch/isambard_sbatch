@@ -275,22 +275,22 @@ echo "── Integration Tests: Dry Run ──"
 # Check if SLURM is available
 if command -v squeue &>/dev/null; then
     # Get current a5k usage for context
-    current=$(SAFE_SBATCH_ACCOUNT=brics.a5k get_current_nodes)
+    current=$(ISAMBARD_SBATCH_ACCOUNT=brics.a5k get_current_nodes)
     echo "  (Current brics.a5k node usage: $current)"
 
     # Test 1: Dry run that should PASS (high limit)
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "dry run passes with high limit" "[DRY RUN] Would submit" "$output"
 
     # Test 2: Dry run that should be BLOCKED (limit=0)
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "blocked with limit=0" "BLOCKED" "$output"
 
     # Test 3: Dry run with limit = current usage (requesting 1 more should block)
     if [[ $current -gt 0 ]]; then
-        output=$(SAFE_SBATCH_MAX_NODES=$current SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+        output=$(ISAMBARD_SBATCH_MAX_NODES=$current ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
             "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
         assert_contains "blocked when at capacity" "BLOCKED" "$output"
     else
@@ -299,46 +299,46 @@ if command -v squeue &>/dev/null; then
 
     # Test 4: Dry run with limit = current + 1 (should pass)
     limit=$((current + 1))
-    output=$(SAFE_SBATCH_MAX_NODES=$limit SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=$limit ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "passes when 1 under limit" "[DRY RUN] Would submit" "$output"
 
     # Test 5: Dry run with --nodes from script (no CLI --nodes)
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" "$TMPDIR_TESTS/nodes4.sbatch" 2>&1) || true
     assert_contains "dry run with script nodes" "[DRY RUN] Would submit" "$output"
     assert_contains "dry run reports +4 nodes" "+4 nodes" "$output"
 
     # Test 6: FORCE bypasses limit
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 SAFE_SBATCH_FORCE=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 ISAMBARD_SBATCH_FORCE=1 \
         "$ISAMBARD_SBATCH" --nodes=64 --wrap="hostname" 2>&1) || true
     assert_contains "force bypasses limit" "[FORCED]" "$output"
 
     # Test 7: Default nodes (no --nodes anywhere) should be 1
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" "$TMPDIR_TESTS/no_nodes.sbatch" 2>&1) || true
     assert_contains "default 1 node" "+1 nodes" "$output"
 
     # Test 8: Node range in script
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" "$TMPDIR_TESTS/node_range.sbatch" 2>&1) || true
     assert_contains "node range resolves to max (8)" "+8 nodes" "$output"
 
     # Test 9: Blocked output includes account name
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "blocked msg shows account" "brics.a5k" "$output"
 
     # Test 10: Blocked exit code is 1
     set +e
-    SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" &>/dev/null
     code=$?
     set -e
     assert_exit_code "blocked exit code is 1" "1" "$code"
 
     # Test 11: Cluster summary appears on passing dry run
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "summary shows cluster stats" "Cluster:" "$output"
     assert_contains "summary shows account usage" "Account:" "$output"
@@ -346,7 +346,7 @@ if command -v squeue &>/dev/null; then
     assert_contains "summary shows request line" "Request:" "$output"
 
     # Test 12: Cluster summary appears on blocked submission too
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "blocked output includes cluster stats" "Cluster:" "$output"
     assert_contains "blocked output includes per-user breakdown" "$USER" "$output"
@@ -362,13 +362,13 @@ echo "── Integration Tests: sbatch Wrapper ──"
 
 if [[ -x "$SBATCH_WRAPPER" ]]; then
     # The sbatch wrapper should invoke isambard_sbatch
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$SBATCH_WRAPPER" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "sbatch wrapper delegates to isambard_sbatch" "[DRY RUN]" "$output"
 
     # sbatch wrapper should also block
     set +e
-    SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DRY_RUN=1 \
+    ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
         "$SBATCH_WRAPPER" --nodes=1 --wrap="hostname" &>/dev/null
     code=$?
     set -e
@@ -379,16 +379,16 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "── Integration Tests: Real Submission (SAFE_SBATCH_MAX_NODES=2) ──"
+echo "── Integration Tests: Real Submission (ISAMBARD_SBATCH_MAX_NODES=2) ──"
 # ─────────────────────────────────────────────────────────────────────────────
 
 if command -v squeue &>/dev/null; then
-    current=$(SAFE_SBATCH_ACCOUNT=brics.a5k get_current_nodes)
+    current=$(ISAMBARD_SBATCH_ACCOUNT=brics.a5k get_current_nodes)
 
-    # Test: With SAFE_SBATCH_MAX_NODES=2, check if we can submit 1 node
+    # Test: With ISAMBARD_SBATCH_MAX_NODES=2, check if we can submit 1 node
     if [[ $((current + 1)) -le 2 ]]; then
         # Should succeed — actually submit a tiny job
-        output=$(SAFE_SBATCH_MAX_NODES=2 SAFE_SBATCH_ACCOUNT=brics.a5k \
+        output=$(ISAMBARD_SBATCH_MAX_NODES=2 ISAMBARD_SBATCH_ACCOUNT=brics.a5k \
             "$ISAMBARD_SBATCH" --nodes=1 --time=00:01:00 --wrap="echo isambard_sbatch_test" 2>&1)
         code=$?
         if [[ $code -eq 0 ]] && [[ "$output" =~ [0-9]+ ]]; then
@@ -409,11 +409,11 @@ if command -v squeue &>/dev/null; then
         skip_test "real submission under limit" "current usage ($current) + 1 > 2"
     fi
 
-    # Test: With SAFE_SBATCH_MAX_NODES=2, requesting nodes that exceed limit
+    # Test: With ISAMBARD_SBATCH_MAX_NODES=2, requesting nodes that exceed limit
     exceed_nodes=$((2 - current + 1))
     if [[ $exceed_nodes -gt 0 ]]; then
         set +e
-        output=$(SAFE_SBATCH_MAX_NODES=2 SAFE_SBATCH_ACCOUNT=brics.a5k \
+        output=$(ISAMBARD_SBATCH_MAX_NODES=2 ISAMBARD_SBATCH_ACCOUNT=brics.a5k \
             "$ISAMBARD_SBATCH" --nodes=$exceed_nodes --time=00:01:00 --wrap="echo blocked" 2>&1)
         code=$?
         set -e
@@ -441,7 +441,7 @@ echo "── Integration Tests: --check Mode ──"
 if command -v squeue &>/dev/null; then
     # Test 1: --check returns 0 when under limit
     set +e
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k \
         "$ISAMBARD_SBATCH" --check 2>&1)
     code=$?
     set -e
@@ -451,7 +451,7 @@ if command -v squeue &>/dev/null; then
 
     # Test 2: --check returns 1 when over limit
     set +e
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k \
         "$ISAMBARD_SBATCH" --check 2>&1)
     code=$?
     set -e
@@ -460,7 +460,7 @@ if command -v squeue &>/dev/null; then
 
     # Test 3: --check with FORCE=1 returns 0 even when over limit
     set +e
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_FORCE=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_FORCE=1 \
         "$ISAMBARD_SBATCH" --check 2>&1)
     code=$?
     set -e
@@ -469,7 +469,7 @@ if command -v squeue &>/dev/null; then
 
     # Test 4: --check ignores DISABLED (still blocks when DISABLED=1)
     set +e
-    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DISABLED=1 \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=0 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DISABLED=1 \
         "$ISAMBARD_SBATCH" --check 2>&1)
     code=$?
     set -e
@@ -478,7 +478,7 @@ if command -v squeue &>/dev/null; then
 
     # Test 5: --check does not invoke sbatch (output should not contain "Submitted batch job")
     set +e
-    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k \
+    output=$(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k \
         "$ISAMBARD_SBATCH" --check 2>&1)
     set -e
     if [[ "$output" == *"Submitted batch job"* ]]; then
@@ -499,7 +499,7 @@ echo "── Integration Tests: DISABLED mode ──"
 
 if command -v squeue &>/dev/null; then
     # When disabled, should pass straight through (use --wrap to keep it harmless)
-    output=$(SAFE_SBATCH_DISABLED=1 SAFE_SBATCH_MAX_NODES=0 \
+    output=$(ISAMBARD_SBATCH_DISABLED=1 ISAMBARD_SBATCH_MAX_NODES=0 \
         "$ISAMBARD_SBATCH" --nodes=64 --time=00:01:00 --wrap="echo disabled_test" 2>&1)
     code=$?
     if [[ $code -eq 0 ]] && [[ "$output" =~ [0-9]+ ]]; then
