@@ -49,7 +49,7 @@ else
 $MARKER — begin
 export PATH="$BIN_DIR:\$PATH"
 alias sbatch='isambard_sbatch'
-export SAFE_SBATCH_MAX_NODES="\${SAFE_SBATCH_MAX_NODES:-99}"
+export SAFE_SBATCH_MAX_NODES="\${SAFE_SBATCH_MAX_NODES:-256}"
 export SAFE_SBATCH_ACCOUNT="\${SAFE_SBATCH_ACCOUNT:-brics.a5k}"
 $MARKER — end
 EOF
@@ -62,7 +62,7 @@ echo ""
 echo "  source $SHELL_RC"
 echo ""
 echo "Configuration (set in your shell or $SHELL_RC):"
-echo "  SAFE_SBATCH_MAX_NODES  — max nodes for the project (default: 99)"
+echo "  SAFE_SBATCH_MAX_NODES  — max nodes for the project (default: 256)"
 echo "  SAFE_SBATCH_ACCOUNT    — SLURM account to check (default: brics.a5k)"
 echo ""
 echo "Both 'sbatch' and 'isambard_sbatch' will now enforce the node limit."
