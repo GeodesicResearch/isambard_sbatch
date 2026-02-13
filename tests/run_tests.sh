@@ -435,6 +435,65 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "── Integration Tests: --check Mode ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+if command -v squeue &>/dev/null; then
+    # Test 1: --check returns 0 when under limit
+    set +e
+    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k \
+        "$ISAMBARD_SBATCH" --check 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "--check returns 0 under limit" "0" "$code"
+    assert_contains "--check output shows OK" "OK" "$output"
+    assert_contains "--check output shows account" "brics.a5k" "$output"
+
+    # Test 2: --check returns 1 when over limit
+    set +e
+    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k \
+        "$ISAMBARD_SBATCH" --check 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "--check returns 1 over limit" "1" "$code"
+    assert_contains "--check blocked output shows BLOCKED" "BLOCKED" "$output"
+
+    # Test 3: --check with FORCE=1 returns 0 even when over limit
+    set +e
+    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_FORCE=1 \
+        "$ISAMBARD_SBATCH" --check 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "--check with FORCE returns 0" "0" "$code"
+    assert_contains "--check forced output shows OK" "OK" "$output"
+
+    # Test 4: --check ignores DISABLED (still blocks when DISABLED=1)
+    set +e
+    output=$(SAFE_SBATCH_MAX_NODES=0 SAFE_SBATCH_ACCOUNT=brics.a5k SAFE_SBATCH_DISABLED=1 \
+        "$ISAMBARD_SBATCH" --check 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "--check ignores DISABLED (still blocks)" "1" "$code"
+    assert_contains "--check with DISABLED still shows BLOCKED" "BLOCKED" "$output"
+
+    # Test 5: --check does not invoke sbatch (output should not contain "Submitted batch job")
+    set +e
+    output=$(SAFE_SBATCH_MAX_NODES=9999 SAFE_SBATCH_ACCOUNT=brics.a5k \
+        "$ISAMBARD_SBATCH" --check 2>&1)
+    set -e
+    if [[ "$output" == *"Submitted batch job"* ]]; then
+        echo "  FAIL: --check should not invoke sbatch"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: --check does not invoke sbatch"
+        PASS=$((PASS + 1))
+    fi
+else
+    skip_test "--check mode tests" "squeue not found (not on SLURM cluster)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "── Integration Tests: DISABLED mode ──"
 # ─────────────────────────────────────────────────────────────────────────────
 

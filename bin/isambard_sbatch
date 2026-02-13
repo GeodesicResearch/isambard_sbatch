@@ -260,6 +260,29 @@ print_cluster_summary() {
     echo "──────────────────────────────────────────────────────────────────" >&2
 }
 
+check_mode() {
+    # Lightweight check: is the account currently over the node limit?
+    # Used by in-script guards to abort jobs submitted via raw /usr/bin/sbatch.
+    # Respects SAFE_SBATCH_FORCE but ignores SAFE_SBATCH_DISABLED (separate defense layer).
+
+    if [[ "$FORCE" == "1" ]]; then
+        echo "isambard_sbatch --check: OK (forced) — account=$ACCOUNT, limit=$MAX_NODES" >&2
+        exit 0
+    fi
+
+    local current_nodes
+    current_nodes=$(get_current_nodes)
+
+    if [[ $current_nodes -gt $MAX_NODES ]]; then
+        echo "isambard_sbatch --check: BLOCKED — account=$ACCOUNT using $current_nodes nodes (limit: $MAX_NODES)" >&2
+        echo "  Cancel pending jobs or raise SAFE_SBATCH_MAX_NODES to unblock." >&2
+        exit 1
+    fi
+
+    echo "isambard_sbatch --check: OK — account=$ACCOUNT using $current_nodes/$MAX_NODES nodes" >&2
+    exit 0
+}
+
 main() {
     # Pass through immediately if disabled
     if [[ "$DISABLED" == "1" ]]; then
@@ -334,6 +357,8 @@ main() {
 # Allow sourcing for unit tests
 if [[ "${1:-}" == "--source-only" ]]; then
     return 0 2>/dev/null || true
+elif [[ "${1:-}" == "--check" ]]; then
+    check_mode
 else
     main "$@"
 fi

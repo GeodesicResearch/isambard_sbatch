@@ -140,6 +140,53 @@ SAFE_SBATCH_DRY_RUN=1 sbatch --nodes=16 config.sbatch
 #         [DRY RUN] Account=brics.a5k  Current=31  Requested=16  Max=128  Total=47
 ```
 
+## Check Mode (`--check`)
+
+The `--check` flag performs a lightweight node-limit check without submitting a job. It's designed for use inside sbatch scripts as a defense-in-depth guard — catching jobs that bypass the `isambard_sbatch` wrapper (e.g., submitted via raw `/usr/bin/sbatch`).
+
+```bash
+# Manual check
+isambard_sbatch --check
+# Output (stderr): isambard_sbatch --check: OK — account=brics.a5k using 42/99 nodes
+
+# Use in an sbatch script (guard snippet)
+if ! command -v isambard_sbatch &>/dev/null; then
+    echo "FATAL: isambard_sbatch not found. Install: ~/isambard_sbatch/install.sh" >&2
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+if ! isambard_sbatch --check; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+```
+
+**Behavior:**
+- Queries current account-wide node usage (running + pending)
+- If `current > SAFE_SBATCH_MAX_NODES`: prints `BLOCKED`, exits 1
+- If under: prints `OK`, exits 0
+- Respects `SAFE_SBATCH_FORCE` (exits 0 when forced)
+- **Ignores** `SAFE_SBATCH_DISABLED` — the guard is a separate defense layer from the wrapper's pass-through mode
+- Does **not** invoke sbatch, does **not** parse node arguments
+
+### Guard Snippet
+
+All sbatch scripts in the project include a guard snippet immediately after the `#SBATCH` directives. This ensures the node limit is enforced even if someone calls `/usr/bin/sbatch` directly:
+
+```bash
+# --- Isambard node-limit guard (do not remove) ---
+if ! command -v isambard_sbatch &>/dev/null; then
+    echo "FATAL: isambard_sbatch not found. Install: ~/isambard_sbatch/install.sh" >&2
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+if ! isambard_sbatch --check; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+```
+
+The guard:
+1. **Fails hard** if `isambard_sbatch` is not installed (cancels the job and exits)
+2. **Cancels the job** if the account is over the node limit
+3. Uses `if !` pattern which is safe with `set -e`
+
 ## How It Works
 
 On every `sbatch` invocation:
@@ -229,6 +276,9 @@ The test suite includes:
 - Disabled mode passthrough (`SAFE_SBATCH_DISABLED=1`)
 - Real job submission and cancellation
 - The `sbatch` wrapper delegates to `isambard_sbatch`
+- `--check` returns 0 when under limit, 1 when over
+- `--check` respects `SAFE_SBATCH_FORCE` but ignores `SAFE_SBATCH_DISABLED`
+- `--check` does not invoke sbatch
 
 ## Troubleshooting
 
