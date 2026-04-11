@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-MAX_NODES="${ISAMBARD_SBATCH_MAX_NODES:-256}"
+MAX_NODES="${ISAMBARD_SBATCH_MAX_NODES:-128}"
 ACCOUNT="${ISAMBARD_SBATCH_ACCOUNT:-brics.a5k}"
 DRY_RUN="${ISAMBARD_SBATCH_DRY_RUN:-0}"
 FORCE="${ISAMBARD_SBATCH_FORCE:-0}"
@@ -217,37 +217,97 @@ print_cluster_summary() {
     local current_nodes="$1"
     local requested_nodes="$2"
 
-    # Cluster-wide node counts by state
+    # Cluster-wide node counts by state. Strip SLURM state suffixes
+    # (*, ~, #, $, @, %, +, -) before bucketing so "mixed-", "drained$",
+    # "down*" etc. don't silently fall off the table.
     local cluster_stats
     cluster_stats=$(sinfo -o "%T %D %G" --noheader 2>/dev/null | awk '
     {
-        state = $1; nodes = $2; gres = $3
+        state = $1; nodes = $2 + 0; gres = $3
+        sub(/[*~#$@%+-]+$/, "", state)
         gpus_per_node = 4
         if (match(gres, /gpu:([0-9]+)/, arr)) gpus_per_node = arr[1]
         state_nodes[state] += nodes
-        state_gpus[state] += nodes * gpus_per_node
+        state_gpus[state]  += nodes * gpus_per_node
         total_nodes += nodes
-        total_gpus += nodes * gpus_per_node
+        total_gpus  += nodes * gpus_per_node
     }
     END {
-        alloc = state_nodes["allocated"] + state_nodes["mixed"] + state_nodes["completing"] + 0
-        alloc_gpus = state_gpus["allocated"] + state_gpus["mixed"] + state_gpus["completing"] + 0
-        idle_n = state_nodes["idle"] + 0
-        idle_g = state_gpus["idle"] + 0
-        down_n = state_nodes["down"] + state_nodes["drained"] + state_nodes["draining"] + state_nodes["down*"] + state_nodes["drain"] + 0
-        down_g = state_gpus["down"] + state_gpus["drained"] + state_gpus["draining"] + state_gpus["down*"] + state_gpus["drain"] + 0
-        printf "%d %d %d %d %d %d %d %d", total_nodes, total_gpus, alloc, alloc_gpus, idle_n, idle_g, down_n, down_g
+        alloc      = state_nodes["allocated"]  + 0
+        mixed      = state_nodes["mixed"]      + 0
+        completing = state_nodes["completing"] + 0
+        idle_n     = state_nodes["idle"]       + 0
+        down_raw   = state_nodes["down"]       + 0
+        drained    = state_nodes["drained"]    + 0
+        draining   = state_nodes["draining"]   + 0
+        maint      = state_nodes["maint"]      + 0
+        reserved   = state_nodes["reserved"]   + 0
+        planned    = state_nodes["planned"]    + 0
+
+        active_n = alloc + mixed + completing
+        active_g = state_gpus["allocated"] + state_gpus["mixed"] + state_gpus["completing"] + 0
+        down_n   = down_raw + drained + draining + maint
+        down_g   = state_gpus["down"] + state_gpus["drained"] + state_gpus["draining"] + state_gpus["maint"] + 0
+        idle_g   = state_gpus["idle"] + 0
+        other_n  = total_nodes - active_n - idle_n - down_n
+
+        printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+            total_nodes, total_gpus,
+            active_n, active_g, alloc, mixed, completing,
+            idle_n, idle_g,
+            down_n, down_g, down_raw, drained, draining, maint,
+            other_n, reserved, planned
     }')
 
-    local total_nodes total_gpus alloc_nodes alloc_gpus idle_nodes idle_gpus down_nodes down_gpus
-    read -r total_nodes total_gpus alloc_nodes alloc_gpus idle_nodes idle_gpus down_nodes down_gpus <<< "$cluster_stats"
+    local total_nodes total_gpus
+    local active_n active_g alloc_n mixed_n completing_n
+    local idle_n idle_g
+    local down_n down_g down_raw drained_n draining_n maint_n
+    local other_n reserved_n planned_n
+    read -r total_nodes total_gpus \
+        active_n active_g alloc_n mixed_n completing_n \
+        idle_n idle_g \
+        down_n down_g down_raw drained_n draining_n maint_n \
+        other_n reserved_n planned_n <<< "$cluster_stats"
 
+    # Integer percentages of total cluster nodes
+    local active_pct=0 idle_pct=0 down_pct=0
+    if [[ ${total_nodes:-0} -gt 0 ]]; then
+        active_pct=$(( 100 * active_n / total_nodes ))
+        idle_pct=$((   100 * idle_n   / total_nodes ))
+        down_pct=$((   100 * down_n   / total_nodes ))
+    fi
+
+    # Build "N label + M label" breakdown strings, omitting zero components.
+    local active_bd="" down_bd="" other_bd=""
+    [[ ${alloc_n:-0}      -gt 0 ]] && active_bd="${alloc_n} alloc"
+    [[ ${mixed_n:-0}      -gt 0 ]] && active_bd="${active_bd:+${active_bd} + }${mixed_n} mixed"
+    [[ ${completing_n:-0} -gt 0 ]] && active_bd="${active_bd:+${active_bd} + }${completing_n} completing"
+    [[ ${down_raw:-0}     -gt 0 ]] && down_bd="${down_raw} down"
+    [[ ${drained_n:-0}    -gt 0 ]] && down_bd="${down_bd:+${down_bd} + }${drained_n} drained"
+    [[ ${draining_n:-0}   -gt 0 ]] && down_bd="${down_bd:+${down_bd} + }${draining_n} draining"
+    [[ ${maint_n:-0}      -gt 0 ]] && down_bd="${down_bd:+${down_bd} + }${maint_n} maint"
+    [[ ${reserved_n:-0}   -gt 0 ]] && other_bd="${reserved_n} reserved"
+    [[ ${planned_n:-0}    -gt 0 ]] && other_bd="${other_bd:+${other_bd} + }${planned_n} planned"
+
+    local effective_n=$(( total_nodes - down_n - other_n ))
     local headroom=$((MAX_NODES - current_nodes))
     if [[ $headroom -lt 0 ]]; then headroom=0; fi
     local after_submit=$((current_nodes + requested_nodes))
 
     echo "──────────────────────────────────────────────────────────────────" >&2
-    echo "  Cluster:  ${alloc_nodes} allocated, ${idle_nodes} idle, ${down_nodes} down  (${total_nodes} nodes / ${total_gpus} GPUs)" >&2
+    printf "  Cluster:  %d nodes / %d GPUs  (%d schedulable)\n" \
+        "$total_nodes" "$total_gpus" "$effective_n" >&2
+    printf "    %-7s %5d  %-6s%s\n" \
+        "active" "$active_n" "($active_pct%)" "${active_bd:+   ${active_bd}}" >&2
+    printf "    %-7s %5d  %-6s\n" \
+        "idle" "$idle_n" "($idle_pct%)" >&2
+    printf "    %-7s %5d  %-6s%s\n" \
+        "down" "$down_n" "($down_pct%)" "${down_bd:+   ${down_bd}}" >&2
+    if [[ ${other_n:-0} -gt 0 ]]; then
+        printf "    %-7s %5d  %-6s%s\n" \
+            "other" "$other_n" "" "${other_bd:+   ${other_bd}}" >&2
+    fi
     echo "  Account:  ${current_nodes} nodes used by $ACCOUNT  (limit: $MAX_NODES, headroom: $headroom)" >&2
 
     local breakdown
