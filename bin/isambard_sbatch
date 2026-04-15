@@ -320,6 +320,16 @@ print_cluster_summary() {
     echo "──────────────────────────────────────────────────────────────────" >&2
 }
 
+# Check if --wrap was passed on the command line.
+has_wrap_arg() {
+    for arg in "$@"; do
+        case "$arg" in
+            --wrap=*|--wrap) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 check_mode() {
     # Lightweight check: is the account currently over the node limit?
     # Used by in-script guards to abort jobs submitted via raw /usr/bin/sbatch.
@@ -362,13 +372,12 @@ main() {
     local requested_nodes
     requested_nodes=$(parse_nodes_from_args "$@")
 
+    local script_file
+    script_file=$(find_script_file "$@")
+
     # If not specified on CLI, check the batch script
-    if [[ -z "$requested_nodes" ]]; then
-        local script_file
-        script_file=$(find_script_file "$@")
-        if [[ -n "$script_file" ]]; then
-            requested_nodes=$(parse_nodes_from_script "$script_file")
-        fi
+    if [[ -z "$requested_nodes" && -n "$script_file" ]]; then
+        requested_nodes=$(parse_nodes_from_script "$script_file")
     fi
 
     # Default to 1 node if not specified anywhere
@@ -391,6 +400,17 @@ main() {
 
     # Always print cluster summary
     print_cluster_summary "$current_nodes" "$requested_nodes"
+
+    # Exit early if no script and no --wrap — real sbatch would hang on stdin
+    if [[ -z "$script_file" ]] && ! has_wrap_arg "$@"; then
+        echo "" >&2
+        echo "  No batch script or --wrap provided. Nothing to submit." >&2
+        echo "" >&2
+        echo "  Usage: isambard_sbatch [OPTIONS...] <script> [args...]" >&2
+        echo "         isambard_sbatch [OPTIONS...] --wrap=\"command\"" >&2
+        echo "" >&2
+        exit 1
+    fi
 
     if [[ $total -gt $MAX_NODES ]]; then
         echo "" >&2
