@@ -250,6 +250,188 @@ assert_eq "range 4-64" "64" "$result"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "── Unit Tests: bad_nodes_read_active ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+BAD_NODES_FILE="$TMPDIR_TESTS/bn.log"
+BAD_NODES_TTL=3600
+
+# Missing file → empty output
+rm -f "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "missing file" "" "$result"
+
+# Empty file → empty output
+: > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "empty file" "" "$result"
+
+# Fresh entry appears
+now=$(date +%s)
+printf '%s\tnid000001\ttunnel hung\talice\n' "$now" > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "single fresh entry" "nid000001" "$result"
+
+# All-expired entries → empty
+old=$((now - 7200))  # 2 hours ago, TTL=1h
+printf '%s\tnid000002\told\tbob\n' "$old" > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "all-expired entries" "" "$result"
+
+# Mixed fresh + expired → only fresh returned
+{
+    printf '%s\tnid000001\tfresh\talice\n' "$now"
+    printf '%s\tnid000002\told\tbob\n' "$old"
+} > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "mixed fresh+expired" "nid000001" "$result"
+
+# Duplicate node → deduped
+{
+    printf '%s\tnid000001\tfirst\talice\n' "$now"
+    printf '%s\tnid000001\tsecond\tbob\n' "$now"
+} > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "duplicate node deduped" "nid000001" "$result"
+
+# Malformed line (non-numeric epoch) → silently skipped
+{
+    printf 'notanepoch\tnid000bad\tbad\tmallory\n'
+    printf '%s\tnid000001\tok\talice\n' "$now"
+} > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active)
+assert_eq "malformed epoch skipped" "nid000001" "$result"
+
+# Multiple distinct fresh nodes → all present
+{
+    printf '%s\tnid000001\t-\talice\n' "$now"
+    printf '%s\tnid000002\t-\tbob\n' "$now"
+    printf '%s\tnid000003\t-\tcarol\n' "$now"
+} > "$BAD_NODES_FILE"
+result=$(bad_nodes_read_active | sort | paste -sd, -)
+assert_eq "three distinct fresh nodes" "nid000001,nid000002,nid000003" "$result"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "── Unit Tests: bad_nodes_mark ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Append one entry, verify 4 tab-separated fields
+rm -f "$BAD_NODES_FILE"
+bad_nodes_mark nid000099 "test reason" >/dev/null 2>&1
+line=$(tail -1 "$BAD_NODES_FILE")
+field_count=$(echo "$line" | awk -F'\t' '{print NF}')
+assert_eq "mark appends 4 tab-separated fields" "4" "$field_count"
+
+node_in_line=$(echo "$line" | awk -F'\t' '{print $2}')
+assert_eq "mark writes correct node name" "nid000099" "$node_in_line"
+
+reason_in_line=$(echo "$line" | awk -F'\t' '{print $3}')
+assert_eq "mark writes correct reason" "test reason" "$reason_in_line"
+
+# Reject invalid node name (shell metacharacter)
+set +e
+bad_nodes_mark "nid;rm" "bad" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "mark rejects shell metacharacter in node" "2" "$rc"
+
+# Reject invalid node name (space)
+set +e
+bad_nodes_mark "nid 001" "bad" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "mark rejects space in node name" "2" "$rc"
+
+# Missing node name → usage error
+set +e
+bad_nodes_mark "" "reason" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "mark rejects empty node name" "2" "$rc"
+
+# Strip tabs from reason
+rm -f "$BAD_NODES_FILE"
+bad_nodes_mark nid000010 $'tab\there' >/dev/null 2>&1
+reason_stored=$(tail -1 "$BAD_NODES_FILE" | awk -F'\t' '{print $3}')
+assert_eq "mark strips tabs from reason" "tab here" "$reason_stored"
+
+# Creates file if missing (when directory exists)
+rm -f "$BAD_NODES_FILE"
+bad_nodes_mark nid000011 "auto-create" >/dev/null 2>&1
+assert_eq "mark creates missing file" "1" "$(test -f "$BAD_NODES_FILE" && echo 1 || echo 0)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "── Unit Tests: bad_nodes_inject_exclude ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Helper to run inject_exclude and format output as comma-separated args
+inject_out() {
+    local -a out=()
+    mapfile -d '' -t out < <(bad_nodes_inject_exclude "$@")
+    local IFS='|'
+    echo "${out[*]}"
+}
+
+# Empty bad-nodes file + no --exclude → argv unchanged
+rm -f "$BAD_NODES_FILE"
+: > "$BAD_NODES_FILE"
+result=$(inject_out --nodes=1 --wrap="hostname")
+assert_eq "empty log + no --exclude: argv unchanged" "--nodes=1|--wrap=hostname" "$result"
+
+# Empty bad-nodes file + user --exclude → argv unchanged
+result=$(inject_out --exclude=foo --nodes=1)
+assert_eq "empty log + user --exclude: argv unchanged" "--exclude=foo|--nodes=1" "$result"
+
+# Fresh entry + no user --exclude → --exclude appended
+now=$(date +%s)
+printf '%s\tnid000001\tfresh\talice\n' "$now" > "$BAD_NODES_FILE"
+result=$(inject_out --nodes=1 --wrap="hostname")
+assert_eq "one bad node + no --exclude" "--nodes=1|--wrap=hostname|--exclude=nid000001" "$result"
+
+# Fresh entry + user --exclude=X → merged
+result=$(inject_out --exclude=nid999 --nodes=1)
+assert_eq "bad + user --exclude=X" "--nodes=1|--exclude=nid000001,nid999" "$result"
+
+# Fresh entry + user --exclude X (space form) → merged
+result=$(inject_out --exclude nid999 --nodes=1)
+assert_eq "bad + user --exclude X (space)" "--nodes=1|--exclude=nid000001,nid999" "$result"
+
+# Fresh entry + user -x X → merged
+result=$(inject_out -x nid999 --nodes=1)
+assert_eq "bad + user -x X" "--nodes=1|--exclude=nid000001,nid999" "$result"
+
+# Two separate user --exclude args → both preserved in merged list
+result=$(inject_out --exclude=nid998 --exclude=nid999 --nodes=1)
+assert_eq "two user --exclude args merged" "--nodes=1|--exclude=nid000001,nid998,nid999" "$result"
+
+# Multiple bad nodes → all in --exclude
+{
+    printf '%s\tnid000001\t-\talice\n' "$now"
+    printf '%s\tnid000002\t-\tbob\n' "$now"
+} > "$BAD_NODES_FILE"
+result=$(inject_out --nodes=1 | tr '|' '\n' | grep -c '^nid00000[12]$\|^--exclude=.*nid000001.*nid000002')
+[[ "$result" -ge 1 ]] && echo "  PASS: multiple bad nodes merged" && PASS=$((PASS + 1)) \
+    || { echo "  FAIL: multiple bad nodes merged ($result)"; FAIL=$((FAIL + 1)); }
+
+# All-expired entries → no --exclude injected
+old=$((now - 7200))
+printf '%s\tnid000002\told\tbob\n' "$old" > "$BAD_NODES_FILE"
+result=$(inject_out --nodes=1 --wrap="hostname")
+assert_eq "all-expired: no --exclude injected" "--nodes=1|--wrap=hostname" "$result"
+
+# Bracket expression in user --exclude preserved (not split on comma)
+printf '%s\tnid000001\t-\talice\n' "$now" > "$BAD_NODES_FILE"
+result=$(inject_out --exclude="nid[100,200]" --nodes=1)
+assert_eq "bracket expression preserved" "--nodes=1|--exclude=nid000001,nid[100,200]" "$result"
+
+# Reset for subsequent tests
+rm -f "$BAD_NODES_FILE"
+unset BAD_NODES_FILE BAD_NODES_TTL
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "── Unit Tests: Combined parsing (CLI overrides script) ──"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -350,6 +532,119 @@ if command -v squeue &>/dev/null; then
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "blocked output includes cluster stats" "Cluster:" "$output"
     assert_contains "blocked output includes per-user breakdown" "$USER" "$output"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Bad-nodes integration tests
+    # ─────────────────────────────────────────────────────────────────────────
+    echo ""
+    echo "── Integration Tests: Bad-nodes exclusion ──"
+
+    BN_LOG="$TMPDIR_TESTS/bn_integration.log"
+    BN_ENV=(ISAMBARD_SBATCH_BAD_NODES_FILE="$BN_LOG" ISAMBARD_SBATCH_BAD_NODES_TTL=3600)
+    COMMON_ENV=(ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1)
+
+    # Test: fresh entry → dry-run output contains --exclude
+    now_epoch=$(date +%s)
+    printf '%s\tnid000777\ttunnel-hung\t%s\n' "$now_epoch" "$USER" > "$BN_LOG"
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "dry-run injects --exclude for fresh entry" "--exclude=nid000777" "$output"
+
+    # Test: all-expired → no --exclude injected
+    old_epoch=$((now_epoch - 7200))
+    printf '%s\tnid000777\told\t%s\n' "$old_epoch" "$USER" > "$BN_LOG"
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    if [[ "$output" == *"--exclude="* ]]; then
+        echo "  FAIL: expired entries should not produce --exclude"
+        echo "        output: $output"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: expired entries produce no --exclude"
+        PASS=$((PASS + 1))
+    fi
+
+    # Test: user --exclude + fresh bad node → merged
+    printf '%s\tnid000777\tfresh\t%s\n' "$now_epoch" "$USER" > "$BN_LOG"
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --exclude=nid000111 --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "user --exclude merged with bad-node (has 111)" "nid000111" "$output"
+    assert_contains "user --exclude merged with bad-node (has 777)" "nid000777" "$output"
+
+    # Test: FORCE + fresh entry → dry-run output contains [FORCED] and --exclude
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" ISAMBARD_SBATCH_FORCE=1 \
+        "$ISAMBARD_SBATCH" --nodes=64 --wrap="hostname" 2>&1) || true
+    assert_contains "FORCE still marks [FORCED]" "[FORCED]" "$output"
+    assert_contains "FORCE still injects --exclude" "--exclude=nid000777" "$output"
+
+    # Test: DISABLED mode — should NOT inject (transparent passthrough path).
+    # We check by running DRY_RUN=1 but DISABLED=1 goes straight to exec before
+    # dry-run check, so we'll capture via a nonexistent REAL_SBATCH to avoid
+    # actual submission. Use a harmless check: verify wrapper didn't reach the
+    # injection code by checking "[DRY RUN]" is absent (DISABLED exits to sbatch).
+    # Since a real submission might succeed, we'll skip if too sensitive.
+    output=$(env ISAMBARD_SBATCH_DISABLED=1 "${BN_ENV[@]}" ISAMBARD_SBATCH_DRY_RUN=1 \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="echo disabled_path_marker" 2>&1) || true
+    # DISABLED bypasses DRY_RUN, so output comes from real sbatch (job ID) or
+    # an sbatch error. Either way, our "[DRY RUN]" sentinel should be absent
+    # and our bad node should NOT have been injected.
+    if [[ "$output" == *"[DRY RUN]"* ]]; then
+        echo "  FAIL: DISABLED path should not print [DRY RUN] (should be passthrough)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: DISABLED path bypasses wrapper logic (no [DRY RUN] sentinel)"
+        PASS=$((PASS + 1))
+        # Clean up any real job that may have been submitted
+        if [[ "$output" =~ Submitted\ batch\ job\ ([0-9]+) ]]; then
+            scancel "${BASH_REMATCH[1]}" 2>/dev/null || true
+        fi
+    fi
+
+    # Test: --check mode with fresh bad node → no --exclude in output
+    output=$(env "${BN_ENV[@]}" ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k \
+        "$ISAMBARD_SBATCH" --check 2>&1) || true
+    if [[ "$output" == *"--exclude"* ]]; then
+        echo "  FAIL: --check should not reference --exclude"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: --check is inert to bad-nodes (no --exclude)"
+        PASS=$((PASS + 1))
+    fi
+
+    # Test: --mark-bad then --list-bad roundtrip
+    rm -f "$BN_LOG"
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid000555 "smoke test" 2>&1) || true
+    assert_contains "--mark-bad confirms on stderr" "marked 'nid000555'" "$output"
+    assert_eq "--mark-bad creates file" "1" "$(test -f "$BN_LOG" && echo 1 || echo 0)"
+
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1) || true
+    assert_contains "--list-bad shows newly marked node" "nid000555" "$output"
+    assert_contains "--list-bad shows reason" "smoke test" "$output"
+
+    # Test: --list-bad with missing file → exits 0, no traceback
+    rm -f "$BN_LOG"
+    set +e
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad >/dev/null 2>&1
+    rc=$?
+    set -e
+    assert_exit_code "--list-bad with missing file exits 0" "0" "$rc"
+
+    # Test: --mark-bad rejects invalid node name
+    set +e
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad "nid;rm" "bad" >/dev/null 2>&1
+    rc=$?
+    set -e
+    assert_exit_code "--mark-bad rejects shell metacharacter" "2" "$rc"
+
+    # Test: submitting when bad-nodes dir is unmounted (simulated via nonexistent path)
+    output=$(env ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
+        ISAMBARD_SBATCH_BAD_NODES_FILE=/nonexistent/path/bn.log \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "nonexistent bad-nodes file does not block submission" "[DRY RUN] Would submit" "$output"
+    if [[ "$output" == *"--exclude"* ]]; then
+        echo "  FAIL: nonexistent file should not inject --exclude"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: nonexistent file is silent no-op"
+        PASS=$((PASS + 1))
+    fi
 
 else
     skip_test "all integration tests" "squeue not found (not on SLURM cluster)"

@@ -6,11 +6,14 @@
 # the configured maximum.
 #
 # Environment variables:
-#   ISAMBARD_SBATCH_MAX_NODES  - Max nodes for the account (default: 99)
-#   ISAMBARD_SBATCH_ACCOUNT    - SLURM account to check (default: brics.a5k)
-#   ISAMBARD_SBATCH_DRY_RUN    - If 1, print what would happen without submitting
-#   ISAMBARD_SBATCH_FORCE      - If 1, bypass the check entirely
-#   ISAMBARD_SBATCH_DISABLED   - If 1, pass through to real sbatch (no checking)
+#   ISAMBARD_SBATCH_MAX_NODES       - Max nodes for the account (default: 128)
+#   ISAMBARD_SBATCH_ACCOUNT         - SLURM account to check (default: brics.a5k)
+#   ISAMBARD_SBATCH_DRY_RUN         - If 1, print what would happen without submitting
+#   ISAMBARD_SBATCH_FORCE           - If 1, bypass the check entirely
+#   ISAMBARD_SBATCH_DISABLED        - If 1, pass through to real sbatch (no checking)
+#   ISAMBARD_SBATCH_BAD_NODES_FILE  - Shared log of bad nodes to exclude
+#                                     (default: /projects/a5k/public/isambard_sbatch_bad_nodes.log)
+#   ISAMBARD_SBATCH_BAD_NODES_TTL   - Seconds before a bad-node entry expires (default: 604800 = 7 days)
 
 set -euo pipefail
 
@@ -19,6 +22,8 @@ ACCOUNT="${ISAMBARD_SBATCH_ACCOUNT:-brics.a5k}"
 DRY_RUN="${ISAMBARD_SBATCH_DRY_RUN:-0}"
 FORCE="${ISAMBARD_SBATCH_FORCE:-0}"
 DISABLED="${ISAMBARD_SBATCH_DISABLED:-0}"
+BAD_NODES_FILE="${ISAMBARD_SBATCH_BAD_NODES_FILE:-/projects/a5k/public/isambard_sbatch_bad_nodes.log}"
+BAD_NODES_TTL="${ISAMBARD_SBATCH_BAD_NODES_TTL:-604800}"
 
 # Find the real sbatch binary, skipping our own directory
 find_real_sbatch() {
@@ -330,6 +335,188 @@ has_wrap_arg() {
     return 1
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Bad-nodes exclusion
+#
+# A shared, append-only log of compute nodes that the team has reported as
+# broken. Each line: <epoch>\t<node>\t<reason>\t<user>. Entries older than
+# BAD_NODES_TTL seconds are ignored. The wrapper reads active entries and
+# merges them into SLURM's --exclude argument before submission.
+#
+# This feature must never block a submission: on any error (missing file,
+# awk failure, unwritable path), fall back silently to the original argv.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Resolved path to the shared log.
+bad_nodes_file_path() {
+    echo "$BAD_NODES_FILE"
+}
+
+# Read active (non-expired) bad nodes, deduped. One node per line on stdout.
+# Silent no-op if the file is missing or unreadable.
+bad_nodes_read_active() {
+    [[ -r "$BAD_NODES_FILE" ]] || return 0
+    local now
+    now=$(date +%s 2>/dev/null) || return 0
+    awk -F'\t' -v now="$now" -v ttl="$BAD_NODES_TTL" '
+        $1 ~ /^[0-9]+$/ && $2 != "" && (now - $1) < ttl {
+            if (!seen[$2]++) print $2
+        }
+    ' "$BAD_NODES_FILE" 2>/dev/null || true
+}
+
+# Append a bad-node entry. Usage: bad_nodes_mark <node> [reason]
+bad_nodes_mark() {
+    local node="${1:-}"
+    local reason="${2:-}"
+
+    if [[ -z "$node" ]]; then
+        echo "isambard_sbatch --mark-bad: error: missing node name" >&2
+        echo "  Usage: isambard_sbatch --mark-bad <node> [reason]" >&2
+        return 2
+    fi
+    if ! [[ "$node" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "isambard_sbatch --mark-bad: error: invalid node name '$node'" >&2
+        echo "  Allowed characters: letters, digits, '.', '_', '-'" >&2
+        return 2
+    fi
+
+    # Strip tabs and newlines from reason so they can't corrupt the record format
+    reason="${reason//$'\t'/ }"
+    reason="${reason//$'\n'/ }"
+
+    local dir
+    dir=$(dirname "$BAD_NODES_FILE")
+    if [[ ! -d "$dir" ]]; then
+        echo "isambard_sbatch --mark-bad: error: directory does not exist: $dir" >&2
+        return 1
+    fi
+
+    # Create file with group-writable perms if missing
+    if [[ ! -e "$BAD_NODES_FILE" ]]; then
+        if ! ( umask 002; : > "$BAD_NODES_FILE" ) 2>/dev/null; then
+            echo "isambard_sbatch --mark-bad: error: cannot create $BAD_NODES_FILE" >&2
+            return 1
+        fi
+        chmod 664 "$BAD_NODES_FILE" 2>/dev/null || true
+    fi
+
+    local epoch
+    epoch=$(date +%s)
+    # Single printf ≤ PIPE_BUF is atomic on O_APPEND (Linux) — no flock needed
+    if ! printf '%s\t%s\t%s\t%s\n' "$epoch" "$node" "$reason" "${USER:-unknown}" >> "$BAD_NODES_FILE"; then
+        echo "isambard_sbatch --mark-bad: error: cannot append to $BAD_NODES_FILE" >&2
+        return 1
+    fi
+
+    echo "isambard_sbatch: marked '$node' as bad${reason:+ (${reason})} in $BAD_NODES_FILE" >&2
+    return 0
+}
+
+# Print active bad-node entries in human-readable form.
+bad_nodes_list() {
+    if [[ ! -r "$BAD_NODES_FILE" ]]; then
+        echo "isambard_sbatch --list-bad: no bad-nodes file at $BAD_NODES_FILE" >&2
+        return 0
+    fi
+
+    local now
+    now=$(date +%s)
+    local found=0
+    local epoch node reason user
+    while IFS=$'\t' read -r epoch node reason user; do
+        [[ "$epoch" =~ ^[0-9]+$ ]] || continue
+        [[ -n "$node" ]] || continue
+        (( now - epoch < BAD_NODES_TTL )) || continue
+        local when
+        when=$(date -d "@$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$epoch")
+        printf '  %s  %-24s  %-40s  (%s)\n' "$when" "$node" "${reason:--}" "${user:-?}"
+        found=1
+    done < "$BAD_NODES_FILE"
+
+    if [[ $found -eq 0 ]]; then
+        echo "isambard_sbatch --list-bad: no active bad-node entries (TTL: ${BAD_NODES_TTL}s)" >&2
+    fi
+    return 0
+}
+
+# Rewrite argv to merge cached bad nodes into --exclude.
+# Reads original argv from "$@"; emits new argv NUL-separated on stdout.
+# Callers should read back with: mapfile -d '' -t new_args < <(bad_nodes_inject_exclude "$@")
+# On any failure, emits the original argv unchanged.
+bad_nodes_inject_exclude() {
+    local bad_list
+    bad_list=$(bad_nodes_read_active 2>/dev/null | paste -sd, - 2>/dev/null) || bad_list=""
+
+    # Fast path: no cached bad nodes — leave argv completely untouched
+    if [[ -z "$bad_list" ]]; then
+        local a
+        for a in "$@"; do
+            printf '%s\0' "$a"
+        done
+        return 0
+    fi
+
+    local -a new_args=()
+    local -a user_excludes=()
+    local args=("$@")
+    local i=0 arg
+
+    while [[ $i -lt ${#args[@]} ]]; do
+        arg="${args[$i]}"
+        case "$arg" in
+            --exclude=*)
+                user_excludes+=("${arg#--exclude=}")
+                ;;
+            --exclude|-x)
+                i=$((i + 1))
+                if [[ $i -lt ${#args[@]} ]]; then
+                    user_excludes+=("${args[$i]}")
+                fi
+                ;;
+            -x=*)
+                user_excludes+=("${arg#-x=}")
+                ;;
+            -x?*)
+                user_excludes+=("${arg#-x}")
+                ;;
+            *)
+                new_args+=("$arg")
+                ;;
+        esac
+        i=$((i + 1))
+    done
+
+    # Build final --exclude value. Strategy:
+    #  - bad_list is a CSV of single node names (no commas/brackets in each name)
+    #    that's already been deduped by bad_nodes_read_active.
+    #  - User excludes are treated as opaque atoms: we do NOT split on commas,
+    #    because SLURM accepts bracket ranges like "nid[001,003,005]" whose
+    #    internal commas must be preserved.
+    #  - Concatenate user excludes after bad_list. SLURM tolerates duplicates.
+    local merged="$bad_list"
+    local e
+    if [[ ${#user_excludes[@]} -gt 0 ]]; then
+        for e in "${user_excludes[@]}"; do
+            [[ -n "$e" ]] || continue
+            if [[ -n "$merged" ]]; then
+                merged="${merged},${e}"
+            else
+                merged="$e"
+            fi
+        done
+    fi
+
+    local a
+    for a in "${new_args[@]}"; do
+        printf '%s\0' "$a"
+    done
+    if [[ -n "$merged" ]]; then
+        printf '%s\0' "--exclude=$merged"
+    fi
+    return 0
+}
+
 check_mode() {
     # Lightweight check: is the account currently over the node limit?
     # Used by in-script guards to abort jobs submitted via raw /usr/bin/sbatch.
@@ -361,11 +548,13 @@ main() {
 
     # Pass through if forced
     if [[ "$FORCE" == "1" ]]; then
+        local -a forced_args=()
+        mapfile -d '' -t forced_args < <(bad_nodes_inject_exclude "$@")
         if [[ "$DRY_RUN" == "1" ]]; then
-            echo "[DRY RUN] [FORCED] Would submit: $REAL_SBATCH $*"
+            echo "[DRY RUN] [FORCED] Would submit: $REAL_SBATCH ${forced_args[*]}"
             exit 0
         fi
-        exec "$REAL_SBATCH" "$@"
+        exec "$REAL_SBATCH" "${forced_args[@]}"
     fi
 
     # Parse requested nodes from CLI args (CLI overrides script directives)
@@ -424,14 +613,19 @@ main() {
         exit 1
     fi
 
+    # Rebuild argv with bad-node exclusions merged into --exclude.
+    # Safe no-op if the shared file is missing or empty.
+    local -a submit_args=()
+    mapfile -d '' -t submit_args < <(bad_nodes_inject_exclude "$@")
+
     # Dry run: report what would happen
     if [[ "$DRY_RUN" == "1" ]]; then
-        echo "[DRY RUN] Would submit: $REAL_SBATCH $*" >&2
+        echo "[DRY RUN] Would submit: $REAL_SBATCH ${submit_args[*]}" >&2
         exit 0
     fi
 
     # All checks passed — submit
-    exec "$REAL_SBATCH" "$@"
+    exec "$REAL_SBATCH" "${submit_args[@]}"
 }
 
 # Allow sourcing for unit tests
@@ -439,6 +633,12 @@ if [[ "${1:-}" == "--source-only" ]]; then
     return 0 2>/dev/null || true
 elif [[ "${1:-}" == "--check" ]]; then
     check_mode
+elif [[ "${1:-}" == "--mark-bad" ]]; then
+    bad_nodes_mark "${2:-}" "${3:-}"
+    exit $?
+elif [[ "${1:-}" == "--list-bad" ]]; then
+    bad_nodes_list
+    exit $?
 else
     main "$@"
 fi
