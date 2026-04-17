@@ -462,6 +462,151 @@ bad_nodes_list() {
     return 0
 }
 
+# Internal: atomically rewrite BAD_NODES_FILE with filtered content from stdin.
+# Writes to a temp file in the same directory, then renames over the original.
+# This is the POSIX safe-rewrite pattern (rename is atomic on a single filesystem).
+_bad_nodes_rewrite_from_stdin() {
+    local dir
+    dir=$(dirname "$BAD_NODES_FILE")
+    local tmpfile
+    tmpfile=$(mktemp "${dir}/.isambard_sbatch_bn.XXXXXX" 2>/dev/null) || {
+        echo "isambard_sbatch: error: cannot create temp file in $dir" >&2
+        return 1
+    }
+    # Copy stdin to temp file
+    cat > "$tmpfile" || {
+        rm -f "$tmpfile"
+        echo "isambard_sbatch: error: cannot write to temp file" >&2
+        return 1
+    }
+    chmod 664 "$tmpfile" 2>/dev/null || true
+    if ! mv -f "$tmpfile" "$BAD_NODES_FILE"; then
+        rm -f "$tmpfile"
+        echo "isambard_sbatch: error: cannot replace $BAD_NODES_FILE" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Remove ALL entries (active and expired) for a given node. Usage:
+#   bad_nodes_unmark <node>
+bad_nodes_unmark() {
+    local node="${1:-}"
+
+    if [[ -z "$node" ]]; then
+        echo "isambard_sbatch --unmark-bad: error: missing node name" >&2
+        echo "  Usage: isambard_sbatch --unmark-bad <node>" >&2
+        return 2
+    fi
+    if ! [[ "$node" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "isambard_sbatch --unmark-bad: error: invalid node name '$node'" >&2
+        return 2
+    fi
+
+    if [[ ! -r "$BAD_NODES_FILE" ]]; then
+        echo "isambard_sbatch --unmark-bad: no bad-nodes file at $BAD_NODES_FILE" >&2
+        return 0
+    fi
+
+    # Count matches first so we can report how many we removed
+    local removed
+    removed=$(awk -F'\t' -v n="$node" '$2 == n' "$BAD_NODES_FILE" 2>/dev/null | wc -l | tr -d ' ')
+    removed="${removed:-0}"
+
+    if [[ "$removed" -eq 0 ]]; then
+        echo "isambard_sbatch --unmark-bad: no entries found for '$node' in $BAD_NODES_FILE" >&2
+        return 0
+    fi
+
+    # Rewrite the file excluding matching lines
+    awk -F'\t' -v n="$node" '$2 != n' "$BAD_NODES_FILE" | _bad_nodes_rewrite_from_stdin || return 1
+
+    echo "isambard_sbatch: unmarked '$node' (${removed} entries removed) from $BAD_NODES_FILE" >&2
+    return 0
+}
+
+# Replace: remove all existing entries for a node and append a fresh one.
+# Usage: bad_nodes_update <node> <new reason>
+bad_nodes_update() {
+    local node="${1:-}"
+    local reason="${2:-}"
+
+    if [[ -z "$node" ]]; then
+        echo "isambard_sbatch --update-bad: error: missing node name" >&2
+        echo "  Usage: isambard_sbatch --update-bad <node> <new reason>" >&2
+        return 2
+    fi
+    if ! [[ "$node" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "isambard_sbatch --update-bad: error: invalid node name '$node'" >&2
+        return 2
+    fi
+
+    # Strip tabs/newlines from reason
+    reason="${reason//$'\t'/ }"
+    reason="${reason//$'\n'/ }"
+
+    local dir
+    dir=$(dirname "$BAD_NODES_FILE")
+    if [[ ! -d "$dir" ]]; then
+        echo "isambard_sbatch --update-bad: error: directory does not exist: $dir" >&2
+        return 1
+    fi
+
+    # Create file if missing — then update = just a mark
+    if [[ ! -e "$BAD_NODES_FILE" ]]; then
+        bad_nodes_mark "$node" "$reason"
+        return $?
+    fi
+
+    local removed
+    removed=$(awk -F'\t' -v n="$node" '$2 == n' "$BAD_NODES_FILE" 2>/dev/null | wc -l | tr -d ' ')
+    removed="${removed:-0}"
+
+    local epoch
+    epoch=$(date +%s)
+
+    # Build new content: all non-matching lines, then the new entry
+    {
+        awk -F'\t' -v n="$node" '$2 != n' "$BAD_NODES_FILE"
+        printf '%s\t%s\t%s\t%s\n' "$epoch" "$node" "$reason" "${USER:-unknown}"
+    } | _bad_nodes_rewrite_from_stdin || return 1
+
+    if [[ "$removed" -eq 0 ]]; then
+        echo "isambard_sbatch: updated '$node' (no prior entries — added fresh) in $BAD_NODES_FILE" >&2
+    else
+        echo "isambard_sbatch: updated '$node' (replaced ${removed} prior entries) in $BAD_NODES_FILE" >&2
+    fi
+    return 0
+}
+
+# Housekeeping: drop all expired entries from the file. Keeps the log from
+# growing indefinitely (the read-side filter already hides them, but the
+# file itself retains history forever without this).
+bad_nodes_prune() {
+    if [[ ! -r "$BAD_NODES_FILE" ]]; then
+        echo "isambard_sbatch --prune-bad: no bad-nodes file at $BAD_NODES_FILE" >&2
+        return 0
+    fi
+
+    local now
+    now=$(date +%s)
+    local before after
+    before=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+    before="${before:-0}"
+
+    # Keep only lines with a valid, fresh epoch
+    awk -F'\t' -v now="$now" -v ttl="$BAD_NODES_TTL" '
+        $1 ~ /^[0-9]+$/ && (now - $1) < ttl { print }
+    ' "$BAD_NODES_FILE" | _bad_nodes_rewrite_from_stdin || return 1
+
+    after=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+    after="${after:-0}"
+    local removed=$((before - after))
+
+    echo "isambard_sbatch --prune-bad: removed ${removed} expired/malformed lines (kept ${after}) in $BAD_NODES_FILE" >&2
+    return 0
+}
+
 # Rewrite argv to merge cached bad nodes into --exclude.
 # Reads original argv from "$@"; emits new argv NUL-separated on stdout.
 # Callers should read back with: mapfile -d '' -t new_args < <(bad_nodes_inject_exclude "$@")
@@ -660,6 +805,15 @@ elif [[ "${1:-}" == "--mark-bad" ]]; then
     exit $?
 elif [[ "${1:-}" == "--list-bad" ]]; then
     bad_nodes_list
+    exit $?
+elif [[ "${1:-}" == "--update-bad" ]]; then
+    bad_nodes_update "${2:-}" "${3:-}"
+    exit $?
+elif [[ "${1:-}" == "--unmark-bad" ]]; then
+    bad_nodes_unmark "${2:-}"
+    exit $?
+elif [[ "${1:-}" == "--prune-bad" ]]; then
+    bad_nodes_prune
     exit $?
 else
     main "$@"

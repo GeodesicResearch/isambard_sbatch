@@ -158,23 +158,38 @@ The cluster occasionally has broken compute nodes — VS Code tunnels that never
 - On every submission, the wrapper reads the log, keeps lines still within the TTL window, dedupes the node list, and merges it with any `--exclude` you passed on the command line before handing control to real sbatch.
 - Active in the main and `ISAMBARD_SBATCH_FORCE=1` paths. Skipped when `ISAMBARD_SBATCH_DISABLED=1` (transparent passthrough) and in `--check` (no submission).
 
-### Mark a node as bad
+### CRUD subcommands
+
+The wrapper exposes the full lifecycle for bad-node entries:
+
+| Operation | Command | Notes |
+|---|---|---|
+| **Create** | `isambard_sbatch --mark-bad <node> [reason]` | Appends a new entry. Duplicates allowed. |
+| **Read** | `isambard_sbatch --list-bad` | Shows active (non-expired) entries as `<date> <node> <reason> (<user>)`. |
+| **Update** | `isambard_sbatch --update-bad <node> <reason>` | Atomically replaces all prior entries for the node with one fresh entry. Resets the TTL clock. |
+| **Delete** | `isambard_sbatch --unmark-bad <node>` | Removes all entries (active and expired) for the node. |
+| **Prune** | `isambard_sbatch --prune-bad` | Housekeeping: drops all expired/malformed lines from the file. Safe to run periodically. |
 
 ```bash
+# Report a node
 isambard_sbatch --mark-bad nid001234 "vscode tunnel failed to come up"
-```
 
-The node name must match `^[A-Za-z0-9._-]+$`. Tabs and newlines are stripped from the reason. The file is created with group-writable perms if missing.
-
-### List active bad nodes
-
-```bash
+# Inspect
 isambard_sbatch --list-bad
 #   2026-04-16 09:12:03  nid001234                 vscode tunnel failed          (alice)
 #   2026-04-16 14:47:11  nid005678                 nccl timeout                  (bob)
+
+# Fix the reason without piling on more rows
+isambard_sbatch --update-bad nid001234 "GPU ECC errors (Xid 48)"
+
+# Node got fixed early — remove it
+isambard_sbatch --unmark-bad nid001234
+
+# Clean up expired history (optional; read-side filter already hides them)
+isambard_sbatch --prune-bad
 ```
 
-Expired entries are hidden.
+The node name must match `^[A-Za-z0-9._-]+$`. Tabs and newlines are stripped from reasons. `--mark-bad` creates the file with group-writable perms if missing. Update/delete/prune rewrite the file atomically via a temp-file-plus-rename (safe if the process is killed mid-write, and rename is atomic on a single filesystem).
 
 ### Manual append
 
@@ -185,7 +200,7 @@ printf '%s\t%s\t%s\t%s\n' "$(date +%s)" nid001234 "tunnel hung" "$USER" \
     >> /projects/a5k/public/isambard_sbatch_bad_nodes.log
 ```
 
-A single `printf` under 4 KB is an atomic append on Linux `O_APPEND` files — multiple team members can append concurrently without locking.
+A single `printf` under 4 KB is an atomic append on Linux `O_APPEND` files — multiple team members can append concurrently without locking. (The rewrite operations — update/delete/prune — are not concurrency-safe against other writers on networked filesystems; if two people run `--unmark-bad` on the same file from different hosts simultaneously, one rewrite wins.)
 
 ### See what's being excluded on a submission
 
@@ -351,7 +366,7 @@ The test suite includes:
 - Bad-node exclusion: fresh entries inject into `--exclude`; expired entries are ignored
 - Bad-node exclusion: merges with user-supplied `--exclude`; preserves SLURM bracket expressions
 - Bad-node exclusion: active under `FORCE`, skipped under `DISABLED` and `--check`
-- `--mark-bad` / `--list-bad` subcommand roundtrip
+- Bad-node CRUD: create (`--mark-bad`), read (`--list-bad`), update (`--update-bad`), delete (`--unmark-bad`), prune (`--prune-bad`) — including end-to-end roundtrip through the dispatch
 
 ## Troubleshooting
 

@@ -498,6 +498,223 @@ done
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "── Unit Tests: bad_nodes_unmark (Delete) ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Unmark nonexistent file → no error
+rm -f "$BAD_NODES_FILE"
+set +e
+bad_nodes_unmark nid000099 >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "unmark on missing file exits 0" "0" "$rc"
+
+# Unmark empty node → error
+set +e
+bad_nodes_unmark "" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "unmark rejects empty node" "2" "$rc"
+
+# Unmark invalid node name → error
+set +e
+bad_nodes_unmark "nid;rm" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "unmark rejects shell metacharacter" "2" "$rc"
+
+# Unmark node that isn't present → no-op, exits 0
+now=$(date +%s)
+printf '%s\tnid_alpha\tactive\talice\n' "$now" > "$BAD_NODES_FILE"
+set +e
+bad_nodes_unmark nid_nonexistent >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "unmark of non-present node exits 0" "0" "$rc"
+# File should be unchanged
+result=$(cat "$BAD_NODES_FILE")
+expected=$(printf '%s\tnid_alpha\tactive\talice' "$now")
+assert_eq "unmark non-present leaves file untouched" "$expected" "$result"
+
+# Unmark single entry
+rm -f "$BAD_NODES_FILE"
+printf '%s\tnid_alpha\tfirst\talice\n' "$now" > "$BAD_NODES_FILE"
+bad_nodes_unmark nid_alpha >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "unmark single entry → 0 lines" "0" "$line_count"
+
+# Unmark removes ALL entries for a node (including duplicates)
+rm -f "$BAD_NODES_FILE"
+{
+    printf '%s\tnid_alpha\tfirst\talice\n' "$now"
+    printf '%s\tnid_beta\tkeep\tbob\n' "$now"
+    printf '%s\tnid_alpha\tsecond\tcarol\n' "$now"
+    printf '%s\tnid_alpha\tthird\tdave\n' "$now"
+} > "$BAD_NODES_FILE"
+bad_nodes_unmark nid_alpha >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "unmark removes all duplicate entries" "1" "$line_count"
+remaining=$(awk -F'\t' '{print $2}' "$BAD_NODES_FILE")
+assert_eq "unmark leaves only non-matching entries" "nid_beta" "$remaining"
+
+# Unmark also removes expired entries of the same node
+rm -f "$BAD_NODES_FILE"
+old=$((now - 7200))
+{
+    printf '%s\tnid_zeta\tfresh\talice\n' "$now"
+    printf '%s\tnid_zeta\texpired\tbob\n' "$old"
+    printf '%s\tnid_gamma\tkeep\tcarol\n' "$now"
+} > "$BAD_NODES_FILE"
+bad_nodes_unmark nid_zeta >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "unmark removes both fresh and expired of same node" "1" "$line_count"
+
+# Unmark → read_active no longer returns the node
+rm -f "$BAD_NODES_FILE"
+printf '%s\tnid_removeme\tfresh\talice\n' "$now" > "$BAD_NODES_FILE"
+before=$(bad_nodes_read_active)
+assert_eq "pre-unmark: node is active" "nid_removeme" "$before"
+bad_nodes_unmark nid_removeme >/dev/null 2>&1
+after=$(bad_nodes_read_active)
+assert_eq "post-unmark: node is gone from active list" "" "$after"
+
+# File permissions preserved (664) after rewrite
+rm -f "$BAD_NODES_FILE"
+printf '%s\tnid_perm\t-\talice\n' "$now" > "$BAD_NODES_FILE"
+chmod 664 "$BAD_NODES_FILE"
+printf '%s\tnid_other\t-\talice\n' "$now" >> "$BAD_NODES_FILE"
+bad_nodes_unmark nid_perm >/dev/null 2>&1
+perms=$(stat -c '%a' "$BAD_NODES_FILE" 2>/dev/null || stat -f '%Lp' "$BAD_NODES_FILE")
+assert_eq "unmark preserves 664 perms on rewrite" "664" "$perms"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "── Unit Tests: bad_nodes_update (Update) ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Update empty node → error
+set +e
+bad_nodes_update "" "reason" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "update rejects empty node" "2" "$rc"
+
+# Update invalid node → error
+set +e
+bad_nodes_update "nid;rm" "reason" >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "update rejects shell metacharacter" "2" "$rc"
+
+# Update when file doesn't exist → creates it with the fresh entry
+rm -f "$BAD_NODES_FILE"
+bad_nodes_update nid_u1 "first" >/dev/null 2>&1
+assert_eq "update creates file if missing" "1" "$(test -f "$BAD_NODES_FILE" && echo 1 || echo 0)"
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "update on missing file → 1 line" "1" "$line_count"
+
+# Update replaces existing entries (multiple → exactly one fresh)
+rm -f "$BAD_NODES_FILE"
+{
+    printf '%s\tnid_u2\told1\talice\n' "$now"
+    printf '%s\tnid_u2\told2\tbob\n' "$now"
+    printf '%s\tnid_u2\told3\tcarol\n' "$now"
+    printf '%s\tnid_keep\tuntouched\tdave\n' "$now"
+} > "$BAD_NODES_FILE"
+bad_nodes_update nid_u2 "new reason" >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "update collapses 3 duplicates into 1" "2" "$line_count"
+
+# After update, only one entry for the node, with the new reason
+u2_count=$(awk -F'\t' '$2 == "nid_u2"' "$BAD_NODES_FILE" | wc -l | tr -d ' ')
+assert_eq "update → exactly one entry for node" "1" "$u2_count"
+u2_reason=$(awk -F'\t' '$2 == "nid_u2" {print $3}' "$BAD_NODES_FILE")
+assert_eq "update writes the new reason" "new reason" "$u2_reason"
+
+# Update of nonexistent node → just appends
+rm -f "$BAD_NODES_FILE"
+printf '%s\tnid_other\told\talice\n' "$now" > "$BAD_NODES_FILE"
+bad_nodes_update nid_new "fresh reason" >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "update of new node → +1 line" "2" "$line_count"
+
+# Update strips tabs from reason
+rm -f "$BAD_NODES_FILE"
+: > "$BAD_NODES_FILE"
+bad_nodes_update nid_u3 $'tab\there' >/dev/null 2>&1
+reason_stored=$(awk -F'\t' '$2 == "nid_u3" {print $3}' "$BAD_NODES_FILE")
+assert_eq "update strips tabs from reason" "tab here" "$reason_stored"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "── Unit Tests: bad_nodes_prune ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Prune on missing file → exits 0
+rm -f "$BAD_NODES_FILE"
+set +e
+bad_nodes_prune >/dev/null 2>&1
+rc=$?
+set -e
+assert_exit_code "prune on missing file exits 0" "0" "$rc"
+
+# Prune with all-fresh → keeps everything
+{
+    printf '%s\tnid_p1\t-\talice\n' "$now"
+    printf '%s\tnid_p2\t-\tbob\n' "$now"
+    printf '%s\tnid_p3\t-\tcarol\n' "$now"
+} > "$BAD_NODES_FILE"
+bad_nodes_prune >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "prune keeps all fresh entries" "3" "$line_count"
+
+# Prune with mixed fresh + expired → keeps only fresh
+old=$((now - 7200))
+{
+    printf '%s\tnid_keep1\tfresh\talice\n' "$now"
+    printf '%s\tnid_drop1\texpired\tbob\n' "$old"
+    printf '%s\tnid_keep2\tfresh\tcarol\n' "$now"
+    printf '%s\tnid_drop2\texpired\tdave\n' "$old"
+} > "$BAD_NODES_FILE"
+bad_nodes_prune >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "prune removes expired, keeps fresh" "2" "$line_count"
+remaining=$(awk -F'\t' '{print $2}' "$BAD_NODES_FILE" | sort | paste -sd, -)
+assert_eq "prune leaves only fresh nodes" "nid_keep1,nid_keep2" "$remaining"
+
+# Prune removes malformed lines too
+{
+    printf '%s\tnid_ok\tfresh\talice\n' "$now"
+    printf 'notnumeric\tnid_bad\t-\tbob\n'
+    printf '\n'
+} > "$BAD_NODES_FILE"
+bad_nodes_prune >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "prune removes malformed lines" "1" "$line_count"
+
+# Prune is idempotent
+bad_nodes_prune >/dev/null 2>&1
+line_count=$(wc -l < "$BAD_NODES_FILE" | tr -d ' ')
+assert_eq "prune is idempotent" "1" "$line_count"
+
+# Full CRUD roundtrip: create → read → update → read → delete → read
+rm -f "$BAD_NODES_FILE"
+bad_nodes_mark nid_crud "initial" >/dev/null 2>&1
+result=$(bad_nodes_read_active)
+assert_eq "CRUD roundtrip: after create" "nid_crud" "$result"
+
+bad_nodes_update nid_crud "revised" >/dev/null 2>&1
+result=$(bad_nodes_read_active)
+assert_eq "CRUD roundtrip: after update (still present)" "nid_crud" "$result"
+reason=$(awk -F'\t' '$2 == "nid_crud" {print $3}' "$BAD_NODES_FILE")
+assert_eq "CRUD roundtrip: update wrote new reason" "revised" "$reason"
+
+bad_nodes_unmark nid_crud >/dev/null 2>&1
+result=$(bad_nodes_read_active)
+assert_eq "CRUD roundtrip: after delete" "" "$result"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "── Unit Tests: bad_nodes_inject_exclude ──"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -960,6 +1177,124 @@ if command -v squeue &>/dev/null; then
         ISAMBARD_SBATCH_BAD_NODES_FILE="$BN_LOG" ISAMBARD_SBATCH_BAD_NODES_TTL=1800 \
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "TTL 1800s renders as 1800s" "last 1800s" "$output"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CRUD subcommand dispatch
+    # ─────────────────────────────────────────────────────────────────────────
+    echo ""
+    echo "── Integration Tests: CRUD subcommands ──"
+
+    # --unmark-bad dispatch
+    rm -f "$BN_LOG"
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_int_u1 "to-be-removed" >/dev/null 2>&1
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_int_keep "keep-me" >/dev/null 2>&1
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --unmark-bad nid_int_u1 2>&1) || true
+    assert_contains "--unmark-bad reports removal count" "1 entries removed" "$output"
+
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1) || true
+    assert_contains "--list-bad after unmark shows remaining node" "nid_int_keep" "$output"
+    if [[ "$output" == *"nid_int_u1"* ]]; then
+        echo "  FAIL: --list-bad should not show unmarked node"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: --list-bad does not show unmarked node"
+        PASS=$((PASS + 1))
+    fi
+
+    # --unmark-bad with no args → error
+    set +e
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --unmark-bad >/dev/null 2>&1
+    rc=$?
+    set -e
+    assert_exit_code "--unmark-bad with no node exits 2" "2" "$rc"
+
+    # --update-bad dispatch
+    rm -f "$BN_LOG"
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_int_up "initial reason" >/dev/null 2>&1
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_int_up "second reason" >/dev/null 2>&1
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --update-bad nid_int_up "revised reason" 2>&1) || true
+    assert_contains "--update-bad reports replacement count" "replaced 2 prior entries" "$output"
+
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1) || true
+    assert_contains "--list-bad after update shows new reason" "revised reason" "$output"
+    # Ensure old reasons are gone
+    if [[ "$output" == *"initial reason"* ]]; then
+        echo "  FAIL: update should have removed 'initial reason'"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: update removed old reasons"
+        PASS=$((PASS + 1))
+    fi
+
+    # --update-bad with no node → error
+    set +e
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --update-bad >/dev/null 2>&1
+    rc=$?
+    set -e
+    assert_exit_code "--update-bad with no args exits 2" "2" "$rc"
+
+    # --update-bad on a missing file creates one
+    rm -f "$BN_LOG"
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --update-bad nid_new "first-ever" 2>&1) || true
+    assert_eq "--update-bad on missing file creates file" "1" "$(test -f "$BN_LOG" && echo 1 || echo 0)"
+
+    # --prune-bad removes expired but keeps fresh
+    rm -f "$BN_LOG"
+    old_epoch=$((now_epoch - 7200))
+    {
+        printf '%s\tnid_int_fresh\t-\t%s\n' "$now_epoch" "$USER"
+        printf '%s\tnid_int_old\t-\t%s\n' "$old_epoch" "$USER"
+    } > "$BN_LOG"
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --prune-bad 2>&1) || true
+    assert_contains "--prune-bad reports removed count" "removed 1" "$output"
+    line_count=$(wc -l < "$BN_LOG" | tr -d ' ')
+    assert_eq "--prune-bad left 1 line" "1" "$line_count"
+    remaining=$(awk -F'\t' '{print $2}' "$BN_LOG")
+    assert_eq "--prune-bad kept the fresh node" "nid_int_fresh" "$remaining"
+
+    # --prune-bad on missing file → exits 0
+    rm -f "$BN_LOG"
+    set +e
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --prune-bad >/dev/null 2>&1
+    rc=$?
+    set -e
+    assert_exit_code "--prune-bad on missing file exits 0" "0" "$rc"
+
+    # Full CRUD subcommand roundtrip via the dispatch
+    rm -f "$BN_LOG"
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_e2e "create" >/dev/null 2>&1
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1)
+    assert_contains "E2E: create visible in list" "nid_e2e" "$output"
+
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --update-bad nid_e2e "updated" >/dev/null 2>&1
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1)
+    assert_contains "E2E: update visible with new reason" "updated" "$output"
+
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --unmark-bad nid_e2e >/dev/null 2>&1
+    output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1)
+    if [[ "$output" == *"nid_e2e"* ]]; then
+        echo "  FAIL: E2E delete - node should be gone"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: E2E create→update→delete roundtrip"
+        PASS=$((PASS + 1))
+    fi
+
+    # After CRUD operations, a dry-run shows the correct final state
+    rm -f "$BN_LOG"
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_submit_a "reason-a" >/dev/null 2>&1
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --mark-bad nid_submit_b "reason-b" >/dev/null 2>&1
+    env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --unmark-bad nid_submit_a >/dev/null 2>&1
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "post-CRUD submission excludes remaining node" "nid_submit_b" "$output"
+    if [[ "$output" == *"nid_submit_a"* ]]; then
+        echo "  FAIL: post-CRUD should not exclude the removed node"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: post-CRUD does not exclude the removed node"
+        PASS=$((PASS + 1))
+    fi
 
     # Clean up
     rm -f "$BN_LOG"
