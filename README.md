@@ -189,6 +189,13 @@ A single `printf` under 4 KB is an atomic append on Linux `O_APPEND` files — m
 
 ### See what's being excluded on a submission
 
+Every submission prints a two-line bad-nodes summary (count, TTL window, file path, and the `--mark-bad` hint):
+
+```
+  Bad nodes: 2 excluded (last 7d)  —  file: /projects/a5k/public/isambard_sbatch_bad_nodes.log
+             report more: isambard_sbatch --mark-bad <node> [reason]
+```
+
 Use `ISAMBARD_SBATCH_DRY_RUN=1` to see the full command, including the injected `--exclude`:
 
 ```bash

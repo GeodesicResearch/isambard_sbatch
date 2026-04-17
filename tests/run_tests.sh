@@ -928,6 +928,7 @@ if command -v squeue &>/dev/null; then
     assert_contains "summary shows 'Bad nodes: 1 excluded'" "Bad nodes: 1 excluded" "$output"
     assert_contains "summary shows TTL window (1h)" "last 1h" "$output"
     assert_contains "summary shows --mark-bad hint" "--mark-bad" "$output"
+    assert_contains "summary shows file path (active)" "file: $BN_LOG" "$output"
 
     # Test: cluster summary with no active entries → "none in last ..." line
     rm -f "$BN_LOG"
@@ -936,6 +937,7 @@ if command -v squeue &>/dev/null; then
         "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
     assert_contains "summary shows 'Bad nodes: none in last'" "Bad nodes: none" "$output"
     assert_contains "summary includes --mark-bad hint even with zero" "--mark-bad" "$output"
+    assert_contains "summary shows file path (zero)" "file: $BN_LOG" "$output"
 
     # Test: bad-nodes line reflects count >= 2 when multiple active
     {

@@ -337,9 +337,11 @@ print_cluster_summary() {
         ttl_str="${BAD_NODES_TTL}s"
     fi
     if (( bad_count > 0 )); then
-        echo "  Bad nodes: ${bad_count} excluded (last ${ttl_str})  —  report more: isambard_sbatch --mark-bad <node> [reason]" >&2
+        echo "  Bad nodes: ${bad_count} excluded (last ${ttl_str})  —  file: ${BAD_NODES_FILE}" >&2
+        echo "             report more: isambard_sbatch --mark-bad <node> [reason]" >&2
     else
-        echo "  Bad nodes: none in last ${ttl_str}  —  report one: isambard_sbatch --mark-bad <node> [reason]" >&2
+        echo "  Bad nodes: none in last ${ttl_str}  —  file: ${BAD_NODES_FILE}" >&2
+        echo "             report one: isambard_sbatch --mark-bad <node> [reason]" >&2
     fi
 
     echo "──────────────────────────────────────────────────────────────────" >&2
