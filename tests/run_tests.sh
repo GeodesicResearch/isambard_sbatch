@@ -921,6 +921,44 @@ if command -v squeue &>/dev/null; then
     output=$(env "${BN_ENV[@]}" "$ISAMBARD_SBATCH" --list-bad 2>&1) || true
     assert_contains "--list-bad reports no active when all expired" "no active bad-node entries" "$output"
 
+    # Test: cluster summary includes bad-nodes line when active entries exist
+    printf '%s\tnid000321\tactive\t%s\n' "$now_epoch" "$USER" > "$BN_LOG"
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "summary shows 'Bad nodes: 1 excluded'" "Bad nodes: 1 excluded" "$output"
+    assert_contains "summary shows TTL window (1h)" "last 1h" "$output"
+    assert_contains "summary shows --mark-bad hint" "--mark-bad" "$output"
+
+    # Test: cluster summary with no active entries → "none in last ..." line
+    rm -f "$BN_LOG"
+    : > "$BN_LOG"
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "summary shows 'Bad nodes: none in last'" "Bad nodes: none" "$output"
+    assert_contains "summary includes --mark-bad hint even with zero" "--mark-bad" "$output"
+
+    # Test: bad-nodes line reflects count >= 2 when multiple active
+    {
+        printf '%s\tnid000a\tone\t%s\n' "$now_epoch" "$USER"
+        printf '%s\tnid000b\ttwo\t%s\n' "$now_epoch" "$USER"
+        printf '%s\tnid000c\tthree\t%s\n' "$now_epoch" "$USER"
+    } > "$BN_LOG"
+    output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "summary shows 'Bad nodes: 3 excluded'" "Bad nodes: 3 excluded" "$output"
+
+    # Test: TTL formatting — 7-day default (604800s) renders as "7d"
+    output=$(env ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
+        ISAMBARD_SBATCH_BAD_NODES_FILE="$BN_LOG" ISAMBARD_SBATCH_BAD_NODES_TTL=604800 \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "TTL 604800s renders as 7d" "last 7d" "$output"
+
+    # Test: TTL formatting — 1800s renders as "1800s" (sub-hour)
+    output=$(env ISAMBARD_SBATCH_MAX_NODES=9999 ISAMBARD_SBATCH_ACCOUNT=brics.a5k ISAMBARD_SBATCH_DRY_RUN=1 \
+        ISAMBARD_SBATCH_BAD_NODES_FILE="$BN_LOG" ISAMBARD_SBATCH_BAD_NODES_TTL=1800 \
+        "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+    assert_contains "TTL 1800s renders as 1800s" "last 1800s" "$output"
+
     # Clean up
     rm -f "$BN_LOG"
 

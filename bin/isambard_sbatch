@@ -322,6 +322,26 @@ print_cluster_summary() {
     fi
 
     echo "  Request:  +${requested_nodes} nodes  →  ${after_submit}/${MAX_NODES}" >&2
+
+    # Bad-node exclusion summary: how many nodes are currently in the TTL window
+    # and a hint for reporting new ones.
+    local bad_count
+    bad_count=$(bad_nodes_read_active 2>/dev/null | wc -l | tr -d ' ')
+    bad_count="${bad_count:-0}"
+    local ttl_str
+    if (( BAD_NODES_TTL >= 86400 )); then
+        ttl_str="$((BAD_NODES_TTL / 86400))d"
+    elif (( BAD_NODES_TTL >= 3600 )); then
+        ttl_str="$((BAD_NODES_TTL / 3600))h"
+    else
+        ttl_str="${BAD_NODES_TTL}s"
+    fi
+    if (( bad_count > 0 )); then
+        echo "  Bad nodes: ${bad_count} excluded (last ${ttl_str})  —  report more: isambard_sbatch --mark-bad <node> [reason]" >&2
+    else
+        echo "  Bad nodes: none in last ${ttl_str}  —  report one: isambard_sbatch --mark-bad <node> [reason]" >&2
+    fi
+
     echo "──────────────────────────────────────────────────────────────────" >&2
 }
 
