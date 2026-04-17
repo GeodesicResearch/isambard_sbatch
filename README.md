@@ -20,7 +20,7 @@ isambard_sbatch --nodes=16 pretrain_neox.sbatch /path/to/config.yml
 
 ### Requirements
 
-- Bash 4.0+
+- Bash 4.4+ (bad-node exclusion uses `mapfile -d ''`, which was added in 4.4)
 - SLURM (`sbatch`, `squeue` in PATH)
 - A SLURM account to monitor (default: `brics.a5k`)
 
