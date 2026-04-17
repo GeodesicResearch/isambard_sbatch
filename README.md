@@ -20,7 +20,7 @@ isambard_sbatch --nodes=16 pretrain_neox.sbatch /path/to/config.yml
 
 ### Requirements
 
-- Bash 4.0+
+- Bash 4.4+ (bad-node exclusion uses `mapfile -d ''`, which was added in 4.4)
 - SLURM (`sbatch`, `squeue` in PATH)
 - A SLURM account to monitor (default: `brics.a5k`)
 
@@ -122,6 +122,8 @@ All settings are environment variables. Set them in `.bashrc` for persistence or
 | `ISAMBARD_SBATCH_FORCE` | `0` | Set to `1` to bypass the limit check for a single submission |
 | `ISAMBARD_SBATCH_DISABLED` | `0` | Set to `1` to disable entirely (pass straight through to real sbatch) |
 | `ISAMBARD_SBATCH_DRY_RUN` | `0` | Set to `1` to preview what would happen without actually submitting |
+| `ISAMBARD_SBATCH_BAD_NODES_FILE` | `/projects/a5k/public/isambard_sbatch_bad_nodes.log` | Shared log of bad compute nodes to exclude |
+| `ISAMBARD_SBATCH_BAD_NODES_TTL` | `604800` (7 days) | Seconds before a bad-node entry expires |
 
 ### Examples
 
@@ -143,6 +145,84 @@ ISAMBARD_SBATCH_DRY_RUN=1 isambard_sbatch --nodes=16 config.sbatch
 # Output: [DRY RUN] Would submit: /usr/bin/sbatch --nodes=16 config.sbatch
 #         [DRY RUN] Account=brics.a5k  Current=31  Requested=16  Max=256  Total=47
 ```
+
+## Bad-Node Exclusion
+
+The cluster occasionally has broken compute nodes — VS Code tunnels that never come up, jobs that crash immediately, etc. Because allocations can take hours to cycle through on a busy cluster, landing on a bad node is expensive. `isambard_sbatch` reads a shared list of known-bad nodes and automatically passes them to SLURM's `--exclude` flag on every submission.
+
+### How it works
+
+- A shared append-only log at `/projects/a5k/public/isambard_sbatch_bad_nodes.log` records bad nodes. Every team member can read and append.
+- Each line is tab-separated: `<epoch>\t<node>\t<reason>\t<user>`.
+- Entries expire after `ISAMBARD_SBATCH_BAD_NODES_TTL` seconds (default: 7 days), so a node that's been fixed stops being excluded automatically.
+- On every submission, the wrapper reads the log, keeps lines still within the TTL window, dedupes the node list, and merges it with any `--exclude` you passed on the command line before handing control to real sbatch.
+- Active in the main and `ISAMBARD_SBATCH_FORCE=1` paths. Skipped when `ISAMBARD_SBATCH_DISABLED=1` (transparent passthrough) and in `--check` (no submission).
+
+### CRUD subcommands
+
+The wrapper exposes the full lifecycle for bad-node entries:
+
+| Operation | Command | Notes |
+|---|---|---|
+| **Create** | `isambard_sbatch --mark-bad <node> [reason]` | Appends a new entry. Duplicates allowed. |
+| **Read** | `isambard_sbatch --list-bad` | Shows active (non-expired) entries as `<date> <node> <reason> (<user>)`. |
+| **Update** | `isambard_sbatch --update-bad <node> <reason>` | Atomically replaces all prior entries for the node with one fresh entry. Resets the TTL clock. |
+| **Delete** | `isambard_sbatch --unmark-bad <node>` | Removes all entries (active and expired) for the node. |
+| **Prune** | `isambard_sbatch --prune-bad` | Housekeeping: drops all expired/malformed lines from the file. Safe to run periodically. |
+
+```bash
+# Report a node
+isambard_sbatch --mark-bad nid001234 "vscode tunnel failed to come up"
+
+# Inspect
+isambard_sbatch --list-bad
+#   2026-04-16 09:12:03  nid001234                 vscode tunnel failed          (alice)
+#   2026-04-16 14:47:11  nid005678                 nccl timeout                  (bob)
+
+# Fix the reason without piling on more rows
+isambard_sbatch --update-bad nid001234 "GPU ECC errors (Xid 48)"
+
+# Node got fixed early — remove it
+isambard_sbatch --unmark-bad nid001234
+
+# Clean up expired history (optional; read-side filter already hides them)
+isambard_sbatch --prune-bad
+```
+
+The node name must match `^[A-Za-z0-9._-]+$`. Tabs and newlines are stripped from reasons. `--mark-bad` creates the file with group-writable perms if missing. Update/delete/prune rewrite the file atomically via a temp-file-plus-rename (safe if the process is killed mid-write, and rename is atomic on a single filesystem).
+
+### Manual append
+
+The file format is plain text, so you can append without the subcommand if you prefer:
+
+```bash
+printf '%s\t%s\t%s\t%s\n' "$(date +%s)" nid001234 "tunnel hung" "$USER" \
+    >> /projects/a5k/public/isambard_sbatch_bad_nodes.log
+```
+
+A single `printf` under 4 KB is an atomic append on Linux `O_APPEND` files — multiple team members can append concurrently without locking. (The rewrite operations — update/delete/prune — are not concurrency-safe against other writers on networked filesystems; if two people run `--unmark-bad` on the same file from different hosts simultaneously, one rewrite wins.)
+
+### See what's being excluded on a submission
+
+Every submission prints a two-line bad-nodes summary (count, TTL window, file path, and the `--mark-bad` hint):
+
+```
+  Bad nodes: 2 excluded (last 7d)  —  file: /projects/a5k/public/isambard_sbatch_bad_nodes.log
+             report more: isambard_sbatch --mark-bad <node> [reason]
+```
+
+Use `ISAMBARD_SBATCH_DRY_RUN=1` to see the full command, including the injected `--exclude`:
+
+```bash
+ISAMBARD_SBATCH_DRY_RUN=1 isambard_sbatch --nodes=4 config.sbatch
+# [DRY RUN] Would submit: /usr/bin/sbatch --nodes=4 config.sbatch --exclude=nid001234,nid005678
+```
+
+### Opt out
+
+- Per-submission: `ISAMBARD_SBATCH_DISABLED=1 isambard_sbatch ...` bypasses the wrapper entirely.
+- Use a local log: `export ISAMBARD_SBATCH_BAD_NODES_FILE=~/.my_bad_nodes.log`.
+- Shorten the TTL: `export ISAMBARD_SBATCH_BAD_NODES_TTL=3600` (1 hour).
 
 ## Check Mode (`--check`)
 
@@ -283,6 +363,10 @@ The test suite includes:
 - `--check` returns 0 when under limit, 1 when over
 - `--check` respects `ISAMBARD_SBATCH_FORCE` but ignores `ISAMBARD_SBATCH_DISABLED`
 - `--check` does not invoke sbatch
+- Bad-node exclusion: fresh entries inject into `--exclude`; expired entries are ignored
+- Bad-node exclusion: merges with user-supplied `--exclude`; preserves SLURM bracket expressions
+- Bad-node exclusion: active under `FORCE`, skipped under `DISABLED` and `--check`
+- Bad-node CRUD: create (`--mark-bad`), read (`--list-bad`), update (`--update-bad`), delete (`--unmark-bad`), prune (`--prune-bad`) — including end-to-end roundtrip through the dispatch
 
 ## Troubleshooting
 
