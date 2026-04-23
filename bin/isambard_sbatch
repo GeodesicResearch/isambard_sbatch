@@ -624,13 +624,57 @@ bad_nodes_inject_exclude() {
         return 0
     fi
 
-    local -a new_args=()
+    # sbatch CLI parses args as: [sbatch-flags...] <script> [script-args...]
+    # Everything after the first positional is passed to the batch script and
+    # NOT parsed as sbatch options. So `--exclude=...` must land BEFORE the
+    # script name — tail-appending it silently makes it a script arg instead
+    # of an sbatch flag, and SLURM ignores it (job lands on the "bad" node).
+    # We split argv into (pre_script_flags, script_and_args), strip the user's
+    # --exclude from anywhere it appears, and re-inject the merged exclude
+    # between the two groups.
+
+    # Long/short options that consume the following argument as a value.
+    local -A opts_with_value=(
+        [--nodes]=1 [--ntasks]=1 [--cpus-per-task]=1 [--mem]=1 [--time]=1
+        [--partition]=1 [--output]=1 [--error]=1 [--job-name]=1 [--account]=1
+        [--dependency]=1 [--gres]=1 [--constraint]=1 [--mem-per-cpu]=1
+        [--mem-per-gpu]=1 [--gpus]=1 [--gpus-per-node]=1 [--gpus-per-task]=1
+        [--begin]=1 [--deadline]=1 [--signal]=1 [--mail-type]=1 [--mail-user]=1
+        [--reservation]=1 [--nodefile]=1 [--exclude]=1 [--nice]=1 [--priority]=1
+        [--qos]=1 [--wckey]=1 [--licenses]=1 [--clusters]=1 [--comment]=1
+        [--distribution]=1 [--export]=1 [--extra-node-info]=1 [--hint]=1
+        [--mcs-label]=1 [--network]=1 [--open-mode]=1 [--power]=1
+        [--profile]=1 [--propagate]=1 [--switches]=1 [--thread-spec]=1
+        [--tmp]=1 [--wait-all-nodes]=1 [--chdir]=1 [--workdir]=1 [--wrap]=1
+        [-N]=1 [-n]=1 [-c]=1 [-p]=1 [-t]=1 [-o]=1 [-e]=1 [-J]=1 [-A]=1
+        [-w]=1 [-x]=1 [-D]=1 [-d]=1
+    )
+
+    local -a pre_script_args=()
+    local -a script_and_args=()
     local -a user_excludes=()
     local args=("$@")
     local i=0 arg
+    local saw_script=false
+    local take_next=false  # when set, next arg is a flag value → goes with the flag
+
+    # Helper: route an arg into the correct bucket based on script state.
+    _route() {
+        if $saw_script; then
+            script_and_args+=("$1")
+        else
+            pre_script_args+=("$1")
+        fi
+    }
 
     while [[ $i -lt ${#args[@]} ]]; do
         arg="${args[$i]}"
+        if $take_next; then
+            _route "$arg"
+            take_next=false
+            i=$((i + 1))
+            continue
+        fi
         case "$arg" in
             --exclude=*)
                 user_excludes+=("${arg#--exclude=}")
@@ -647,20 +691,37 @@ bad_nodes_inject_exclude() {
             -x?*)
                 user_excludes+=("${arg#-x}")
                 ;;
+            --*=*)
+                _route "$arg"
+                ;;
+            --*)
+                _route "$arg"
+                if ! $saw_script && [[ -n "${opts_with_value[$arg]+x}" ]]; then
+                    take_next=true
+                fi
+                ;;
+            -[A-Za-z])
+                _route "$arg"
+                if ! $saw_script && [[ -n "${opts_with_value[$arg]+x}" ]]; then
+                    take_next=true
+                fi
+                ;;
+            -[A-Za-z]*)
+                _route "$arg"
+                ;;
             *)
-                new_args+=("$arg")
+                # First positional after flags == sbatch script. Once we've
+                # crossed this boundary, everything else belongs to the script.
+                saw_script=true
+                script_and_args+=("$arg")
                 ;;
         esac
         i=$((i + 1))
     done
 
-    # Build final --exclude value. Strategy:
-    #  - bad_list is a CSV of single node names (no commas/brackets in each name)
-    #    that's already been deduped by bad_nodes_read_active.
-    #  - User excludes are treated as opaque atoms: we do NOT split on commas,
-    #    because SLURM accepts bracket ranges like "nid[001,003,005]" whose
-    #    internal commas must be preserved.
-    #  - Concatenate user excludes after bad_list. SLURM tolerates duplicates.
+    # Merge cached bad_list with whatever user-supplied excludes we saw.
+    # User excludes are treated as opaque atoms (bracket ranges like
+    # "nid[001,003]" contain commas that must stay intact).
     local merged="$bad_list"
     local e
     if [[ ${#user_excludes[@]} -gt 0 ]]; then
@@ -674,13 +735,17 @@ bad_nodes_inject_exclude() {
         done
     fi
 
+    # Emit: pre_script_flags, then --exclude, then script + its args.
     local a
-    for a in "${new_args[@]}"; do
+    for a in "${pre_script_args[@]}"; do
         printf '%s\0' "$a"
     done
     if [[ -n "$merged" ]]; then
         printf '%s\0' "--exclude=$merged"
     fi
+    for a in "${script_and_args[@]}"; do
+        printf '%s\0' "$a"
+    done
     return 0
 }
 

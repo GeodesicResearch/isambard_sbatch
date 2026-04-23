@@ -791,10 +791,12 @@ result=$(inject_out --nodes=1 --wrap=cmd --time=01:00:00)
 assert_eq "non-exclude args keep order, --exclude appended" \
     "--nodes=1|--wrap=cmd|--time=01:00:00|--exclude=nid000001" "$result"
 
-# Positional script file is preserved
+# Positional script file is preserved; --exclude MUST land BEFORE the script
+# so sbatch parses it as a flag (args after the script name belong to the batch
+# script, not to sbatch).
 result=$(inject_out --nodes=1 myscript.sbatch arg1 arg2)
 assert_eq "positional script + trailing args preserved" \
-    "--nodes=1|myscript.sbatch|arg1|arg2|--exclude=nid000001" "$result"
+    "--nodes=1|--exclude=nid000001|myscript.sbatch|arg1|arg2" "$result"
 
 # User --exclude anywhere in argv gets removed and re-added at end
 result=$(inject_out --nodes=1 --exclude=nid999 --wrap=cmd)
