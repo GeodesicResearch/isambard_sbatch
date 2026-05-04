@@ -863,6 +863,96 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "── Unit Tests: Storage helpers ──"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _storage_format_kib: KB-to-human formatting
+assert_eq "_storage_format_kib 0"             "0K"     "$(_storage_format_kib 0)"
+assert_eq "_storage_format_kib 1023"          "1023K"  "$(_storage_format_kib 1023)"
+assert_eq "_storage_format_kib 1024"          "1.0M"   "$(_storage_format_kib 1024)"
+assert_eq "_storage_format_kib 1572864 (1.5G)" "1.5G"  "$(_storage_format_kib 1572864)"
+assert_eq "_storage_format_kib 200T"          "200.0T" "$(_storage_format_kib 214748364800)"
+assert_eq "_storage_format_kib non-numeric"   "?"      "$(_storage_format_kib abc)"
+assert_eq "_storage_format_kib empty"         "?"      "$(_storage_format_kib '')"
+
+# _storage_format_count: count-to-human formatting
+assert_eq "_storage_format_count 0"           "0"      "$(_storage_format_count 0)"
+assert_eq "_storage_format_count 999"         "999"    "$(_storage_format_count 999)"
+assert_eq "_storage_format_count 1000"        "1.0K"   "$(_storage_format_count 1000)"
+assert_eq "_storage_format_count 9.8M"        "9.8M"   "$(_storage_format_count 9753094)"
+assert_eq "_storage_format_count 50M"         "50.0M"  "$(_storage_format_count 50000000)"
+assert_eq "_storage_format_count non-numeric" "?"      "$(_storage_format_count xyz)"
+
+# _storage_pct: percentage calculation
+assert_eq "_storage_pct half"                 "50"     "$(_storage_pct 50 100)"
+assert_eq "_storage_pct full"                 "100"    "$(_storage_pct 100 100)"
+assert_eq "_storage_pct 99%"                  "99"     "$(_storage_pct 214181953556 214748364800)"
+assert_eq "_storage_pct zero limit"           ""       "$(_storage_pct 50 0)"
+assert_eq "_storage_pct invalid used"         ""       "$(_storage_pct foo 100)"
+
+# storage_get_paths: env var override (colon-separated)
+result=$(STORAGE_PATHS="/a:/b:/c" storage_get_paths)
+expected=$'/a\n/b\n/c'
+assert_eq "STORAGE_PATHS yields one path per line" "$expected" "$result"
+
+# storage_get_paths: empty fields are dropped
+result=$(STORAGE_PATHS="/a::/b" storage_get_paths)
+expected=$'/a\n/b'
+assert_eq "empty colon-fields are dropped" "$expected" "$result"
+
+# storage_get_paths: default derives /projects/<account_suffix> when dir exists
+# (run with our project's account so /projects/a5k exists)
+if [[ -d "/projects/a5k" ]]; then
+    result=$(STORAGE_PATHS="" ACCOUNT="brics.a5k" storage_get_paths)
+    assert_eq "default derives /projects/a5k from brics.a5k" "/projects/a5k" "$result"
+else
+    skip_test "default path derivation" "/projects/a5k not present"
+fi
+
+# storage_get_paths: nonexistent default path is not emitted
+result=$(STORAGE_PATHS="" ACCOUNT="brics.does_not_exist_$$" storage_get_paths)
+assert_eq "nonexistent default path produces no output" "" "$result"
+
+# _storage_format_entry: full record with quota and inode limit
+result=$(_storage_format_entry "/projects/a5k" 214181953556 214748364800 9753094 50000000)
+assert_contains "entry contains path"      "/projects/a5k"   "$result"
+assert_contains "entry contains used/limit" "199.5T / 200.0T" "$result"
+assert_contains "entry contains pct"       "(99%)"           "$result"
+assert_contains "entry contains files"     "9.8M / 50.0M"   "$result"
+assert_contains "entry contains files pct" "(19%)"          "$result"
+# Default warn threshold is 90 — 99% should trigger
+assert_contains "entry has nearly-full warning at 99%" "nearly full" "$result"
+
+# _storage_format_entry: under threshold → no warning
+result=$(STORAGE_WARN_PCT=90 _storage_format_entry "/x" 50 100 5 100)
+if [[ "$result" == *"nearly full"* ]]; then
+    echo "  FAIL: 50% should not produce 'nearly full' warning"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: under-threshold entry has no warning"
+    PASS=$((PASS + 1))
+fi
+
+# _storage_format_entry: no quota set (limit=0) → "no quota" suffix
+result=$(_storage_format_entry "/y" 1024 0 10 0)
+assert_contains "no-quota entry says 'no quota'" "no quota" "$result"
+
+# _storage_format_entry: zero files limit → no files segment
+result=$(_storage_format_entry "/z" 1024 4096 100 0)
+if [[ "$result" == *"files:"* ]]; then
+    echo "  FAIL: zero files-limit should suppress files segment"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: zero files-limit suppresses files segment"
+    PASS=$((PASS + 1))
+fi
+
+# Custom warn threshold
+result=$(STORAGE_WARN_PCT=10 _storage_format_entry "/q" 20 100 1 100)
+assert_contains "custom warn threshold triggers" "nearly full" "$result"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "── Integration Tests: Dry Run ──"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1300,6 +1390,94 @@ if command -v squeue &>/dev/null; then
 
     # Clean up
     rm -f "$BN_LOG"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Storage quota integration tests
+    # ─────────────────────────────────────────────────────────────────────────
+    echo ""
+    echo "── Integration Tests: Storage quotas ──"
+
+    if command -v lfs &>/dev/null && [[ -d "/projects/a5k" ]]; then
+        # Storage line appears in cluster summary on a normal submission
+        output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+            "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+        assert_contains "summary shows 'Storage:' label" "Storage:" "$output"
+        assert_contains "summary shows /projects/a5k" "/projects/a5k" "$output"
+        assert_contains "summary shows percentage" "%)" "$output"
+
+        # STORAGE_DISABLED=1 suppresses the line
+        output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" ISAMBARD_SBATCH_STORAGE_DISABLED=1 \
+            "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+        if [[ "$output" == *"Storage:"* ]]; then
+            echo "  FAIL: STORAGE_DISABLED=1 should suppress Storage line"
+            FAIL=$((FAIL + 1))
+        else
+            echo "  PASS: STORAGE_DISABLED=1 suppresses Storage line"
+            PASS=$((PASS + 1))
+        fi
+
+        # Custom STORAGE_PATHS with non-Lustre path is silently skipped
+        output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+            ISAMBARD_SBATCH_STORAGE_PATHS="/nonexistent/$$" \
+            "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+        if [[ "$output" == *"Storage:"* ]]; then
+            echo "  FAIL: nonexistent STORAGE_PATHS should produce no Storage line"
+            FAIL=$((FAIL + 1))
+        else
+            echo "  PASS: nonexistent STORAGE_PATHS is silent no-op"
+            PASS=$((PASS + 1))
+        fi
+
+        # Multi-path mode renders header + indented entries
+        if [[ -d "/scratch/a5k/$USER" ]]; then
+            output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+                ISAMBARD_SBATCH_STORAGE_PATHS="/projects/a5k:/scratch/a5k/$USER" \
+                "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+            assert_contains "multi-path shows /projects/a5k"  "/projects/a5k" "$output"
+            assert_contains "multi-path shows scratch path"   "/scratch/a5k"  "$output"
+        else
+            skip_test "multi-path storage" "/scratch/a5k/$USER not present"
+        fi
+
+        # Custom warn threshold triggers/suppresses "nearly full" predictably.
+        # /projects/a5k sits >90% used in this account, so threshold=10 → warn,
+        # threshold=100 → no warn.
+        output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+            ISAMBARD_SBATCH_STORAGE_WARN_PCT=10 \
+            "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+        assert_contains "warn=10 → 'nearly full' fires" "nearly full" "$output"
+
+        output=$(env "${COMMON_ENV[@]}" "${BN_ENV[@]}" \
+            ISAMBARD_SBATCH_STORAGE_WARN_PCT=100 \
+            "$ISAMBARD_SBATCH" --nodes=1 --wrap="hostname" 2>&1) || true
+        if [[ "$output" == *"nearly full"* ]]; then
+            echo "  FAIL: warn=100 should not produce 'nearly full'"
+            FAIL=$((FAIL + 1))
+        else
+            echo "  PASS: warn=100 suppresses 'nearly full'"
+            PASS=$((PASS + 1))
+        fi
+
+        # --storage subcommand prints to stdout
+        output=$("$ISAMBARD_SBATCH" --storage 2>/dev/null) || true
+        assert_contains "--storage prints path on stdout" "/projects/a5k" "$output"
+        assert_contains "--storage prints percentage" "%)" "$output"
+
+        # --storage exits 0 even when no quota is available
+        set +e
+        env ISAMBARD_SBATCH_STORAGE_PATHS="/nonexistent/$$" \
+            "$ISAMBARD_SBATCH" --storage >/dev/null 2>&1
+        rc=$?
+        set -e
+        assert_exit_code "--storage with no resolvable paths exits 0" "0" "$rc"
+
+        # --storage when disabled prints a helpful message to stderr
+        output=$(env ISAMBARD_SBATCH_STORAGE_DISABLED=1 \
+            "$ISAMBARD_SBATCH" --storage 2>&1) || true
+        assert_contains "--storage disabled message" "STORAGE_DISABLED=1" "$output"
+    else
+        skip_test "Storage integration tests" "lfs or /projects/a5k not present"
+    fi
 
 else
     skip_test "all integration tests" "squeue not found (not on SLURM cluster)"

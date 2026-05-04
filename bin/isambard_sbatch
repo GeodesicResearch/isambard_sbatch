@@ -14,6 +14,9 @@
 #   ISAMBARD_SBATCH_BAD_NODES_FILE  - Shared log of bad nodes to exclude
 #                                     (default: /projects/a5k/public/isambard_sbatch_bad_nodes.log)
 #   ISAMBARD_SBATCH_BAD_NODES_TTL   - Seconds before a bad-node entry expires (default: 604800 = 7 days)
+#   ISAMBARD_SBATCH_STORAGE_DISABLED - If 1, skip the project storage quota report (default: 0)
+#   ISAMBARD_SBATCH_STORAGE_PATHS   - Colon-separated list of paths to query (default: /projects/<account_suffix>)
+#   ISAMBARD_SBATCH_STORAGE_WARN_PCT - Mark a path as nearly-full at this %% (default: 90)
 
 set -euo pipefail
 
@@ -24,6 +27,9 @@ FORCE="${ISAMBARD_SBATCH_FORCE:-0}"
 DISABLED="${ISAMBARD_SBATCH_DISABLED:-0}"
 BAD_NODES_FILE="${ISAMBARD_SBATCH_BAD_NODES_FILE:-/projects/a5k/public/isambard_sbatch_bad_nodes.log}"
 BAD_NODES_TTL="${ISAMBARD_SBATCH_BAD_NODES_TTL:-604800}"
+STORAGE_DISABLED="${ISAMBARD_SBATCH_STORAGE_DISABLED:-0}"
+STORAGE_PATHS="${ISAMBARD_SBATCH_STORAGE_PATHS:-}"
+STORAGE_WARN_PCT="${ISAMBARD_SBATCH_STORAGE_WARN_PCT:-90}"
 
 # Find the real sbatch binary, skipping our own directory
 find_real_sbatch() {
@@ -343,6 +349,8 @@ print_cluster_summary() {
         echo "  Bad nodes: none in last ${ttl_str}  —  file: ${BAD_NODES_FILE}" >&2
         echo "             report one: isambard_sbatch --mark-bad <node> [reason]" >&2
     fi
+
+    print_storage_summary
 
     echo "──────────────────────────────────────────────────────────────────" >&2
 }
@@ -749,6 +757,186 @@ bad_nodes_inject_exclude() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Project storage quotas
+#
+# Reports per-filesystem disk and inode usage on every submission so users see
+# how much project storage is left before a job tries to write. Uses the
+# documented Isambard recipe (Lustre project quotas):
+#     lfs quota -p $(lfs project -d <DIR> | awk '{print $1}') <DIR>
+# https://docs.isambard.ac.uk/user-documentation/information/system-storage/#checking-quotas
+#
+# Like the bad-nodes feature, this must never block a submission: any failure
+# (lfs missing, path on NFS, no project ID, parse error) is a silent no-op.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Format a value in KiB as a short human-readable size (e.g., "1.5G", "200T").
+# The boundary cases produce "<n>K" with no decimal; everything else gets one.
+_storage_format_kib() {
+    local kb="${1:-}"
+    [[ "$kb" =~ ^[0-9]+$ ]] || { echo "?"; return; }
+    awk -v kb="$kb" 'BEGIN {
+        u = "KMGTPE"; v = kb + 0; i = 1
+        while (v >= 1024 && i < length(u)) { v /= 1024; i++ }
+        if (i == 1) printf "%dK", v
+        else        printf "%.1f%s", v, substr(u, i, 1)
+    }'
+}
+
+# Format a count as a short human-readable number (e.g., "9.8M", "12K").
+_storage_format_count() {
+    local n="${1:-}"
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "?"; return; }
+    awk -v n="$n" 'BEGIN {
+        u = " KMGT"; v = n + 0; i = 1
+        while (v >= 1000 && i < length(u)) { v /= 1000; i++ }
+        if (i == 1) printf "%d", v
+        else        printf "%.1f%s", v, substr(u, i, 1)
+    }'
+}
+
+# Integer percentage of used/limit. Echoes nothing if limit is zero or invalid.
+_storage_pct() {
+    local used="${1:-}" limit="${2:-}"
+    [[ "$used"  =~ ^[0-9]+$ ]] || return 0
+    [[ "$limit" =~ ^[0-9]+$ ]] || return 0
+    (( limit > 0 )) || return 0
+    echo $(( 100 * used / limit ))
+}
+
+# Resolve which paths to query. STORAGE_PATHS overrides; otherwise derive a
+# default from the SLURM account name (e.g., "brics.a5k" → "/projects/a5k").
+storage_get_paths() {
+    if [[ -n "$STORAGE_PATHS" ]]; then
+        local IFS=':' p
+        for p in $STORAGE_PATHS; do
+            [[ -n "$p" ]] && echo "$p"
+        done
+        return 0
+    fi
+    local suffix="${ACCOUNT##*.}"
+    [[ -n "$suffix" ]] || return 0
+    local default_path="/projects/$suffix"
+    if [[ -d "$default_path" ]]; then
+        echo "$default_path"
+    fi
+    return 0
+}
+
+# Query Lustre project quota for one path. On success, prints a tab-separated
+# record on stdout: <path>\t<used_kib>\t<limit_kib>\t<files_used>\t<files_limit>
+# Numeric fields may be 0 when no quota is set. Silent no-op on any failure.
+storage_get_quota() {
+    local path="$1"
+    [[ -d "$path" ]] || return 0
+
+    # `lfs project -d` only works on Lustre; on NFS/other it errors with
+    # "Inappropriate ioctl for device". Treat any non-zero exit as "skip".
+    local pid_line pid
+    pid_line=$(lfs project -d "$path" 2>/dev/null) || return 0
+    pid=$(awk 'NR==1 { print $1; exit }' <<< "$pid_line")
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    (( pid > 0 )) || return 0
+
+    local out
+    out=$(lfs quota -p "$pid" "$path" 2>/dev/null) || return 0
+
+    # `lfs quota` may emit data on a single line OR wrap when the path is long:
+    #   short:  "  /projects/a5k 214181953556  0  214748364800  -  9753094  0  50000000  -"  (NF=9)
+    #   wrapped: "/scratch/.../user.a5k\n         8  0  5368709120  -  2  0  1000000  -"     (data NF=8)
+    # Coerce numeric fields with `+0` so an over-quota suffix like "12345*" still parses.
+    local data
+    data=$(awk '
+        NF == 9 && $1 ~ /^\// {
+            printf "%d\t%d\t%d\t%d\n", $2+0, $4+0, $6+0, $8+0
+            exit
+        }
+        NF == 8 && $1 ~ /^[0-9]/ {
+            printf "%d\t%d\t%d\t%d\n", $1+0, $3+0, $5+0, $7+0
+            exit
+        }
+    ' <<< "$out")
+
+    [[ -n "$data" ]] || return 0
+    printf '%s\t%s\n' "$path" "$data"
+}
+
+# Format a single quota record as one display line (no leading whitespace).
+# Output: "<path>  <used>/<limit> (<pct>%)[ — nearly full]  files: <fu>/<fl> (<pct>%)"
+# Pieces are omitted when no quota is set.
+_storage_format_entry() {
+    local path="$1" used_k="$2" limit_k="$3" files_u="$4" files_l="$5"
+
+    local used_h space_str pct=""
+    used_h=$(_storage_format_kib "$used_k")
+    if [[ "$limit_k" =~ ^[0-9]+$ ]] && (( limit_k > 0 )); then
+        local limit_h
+        limit_h=$(_storage_format_kib "$limit_k")
+        pct=$(_storage_pct "$used_k" "$limit_k")
+        space_str="${used_h} / ${limit_h} (${pct}%)"
+    else
+        space_str="${used_h} used (no quota)"
+    fi
+
+    local warn=""
+    if [[ -n "$pct" && "$pct" =~ ^[0-9]+$ ]] && (( pct >= STORAGE_WARN_PCT )); then
+        warn=" — nearly full"
+    fi
+
+    local files_str=""
+    if [[ "$files_l" =~ ^[0-9]+$ ]] && (( files_l > 0 )); then
+        local files_u_h files_l_h files_pct
+        files_u_h=$(_storage_format_count "$files_u")
+        files_l_h=$(_storage_format_count "$files_l")
+        files_pct=$(_storage_pct "$files_u" "$files_l")
+        files_str="  files: ${files_u_h} / ${files_l_h} (${files_pct}%)"
+    fi
+
+    printf '%s  %s%s%s\n' "$path" "$space_str" "$files_str" "$warn"
+}
+
+# Emit one formatted line per resolved path on stdout.
+# Returns 1 if storage reporting is disabled, lfs is missing, or no path
+# yielded a usable quota record.
+storage_summary_lines() {
+    [[ "$STORAGE_DISABLED" == "1" ]] && return 1
+    command -v lfs >/dev/null 2>&1 || return 1
+
+    local emitted=0
+    local path record qpath used_k limit_k files_u files_l
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        record=$(storage_get_quota "$path") || continue
+        [[ -n "$record" ]] || continue
+        IFS=$'\t' read -r qpath used_k limit_k files_u files_l <<< "$record"
+        _storage_format_entry "$qpath" "$used_k" "$limit_k" "$files_u" "$files_l"
+        emitted=1
+    done < <(storage_get_paths)
+
+    (( emitted == 1 )) || return 1
+    return 0
+}
+
+# Print the storage block as part of the cluster summary (stderr, "Storage:" prefix).
+# Single resolved path → one combined line; multiple paths → header + indented lines.
+print_storage_summary() {
+    local out
+    out=$(storage_summary_lines) || return 0
+    [[ -n "$out" ]] || return 0
+
+    local count
+    count=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+    if (( count == 1 )); then
+        echo "  Storage: ${out}" >&2
+    else
+        echo "  Storage:" >&2
+        local line
+        while IFS= read -r line; do
+            echo "    ${line}" >&2
+        done <<< "$out"
+    fi
+}
+
 check_mode() {
     # Lightweight check: is the account currently over the node limit?
     # Used by in-script guards to abort jobs submitted via raw /usr/bin/sbatch.
@@ -880,6 +1068,19 @@ elif [[ "${1:-}" == "--unmark-bad" ]]; then
 elif [[ "${1:-}" == "--prune-bad" ]]; then
     bad_nodes_prune
     exit $?
+elif [[ "${1:-}" == "--storage" ]]; then
+    if storage_summary_lines; then
+        exit 0
+    fi
+    echo "isambard_sbatch --storage: no quota information available" >&2
+    if [[ "$STORAGE_DISABLED" == "1" ]]; then
+        echo "  ISAMBARD_SBATCH_STORAGE_DISABLED=1 is set" >&2
+    elif ! command -v lfs >/dev/null 2>&1; then
+        echo "  lfs binary not found in PATH" >&2
+    else
+        echo "  no resolvable Lustre paths (set ISAMBARD_SBATCH_STORAGE_PATHS to override)" >&2
+    fi
+    exit 0
 else
     main "$@"
 fi

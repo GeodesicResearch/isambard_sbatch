@@ -124,6 +124,9 @@ All settings are environment variables. Set them in `.bashrc` for persistence or
 | `ISAMBARD_SBATCH_DRY_RUN` | `0` | Set to `1` to preview what would happen without actually submitting |
 | `ISAMBARD_SBATCH_BAD_NODES_FILE` | `/projects/a5k/public/isambard_sbatch_bad_nodes.log` | Shared log of bad compute nodes to exclude |
 | `ISAMBARD_SBATCH_BAD_NODES_TTL` | `604800` (7 days) | Seconds before a bad-node entry expires |
+| `ISAMBARD_SBATCH_STORAGE_DISABLED` | `0` | Set to `1` to skip the project storage quota report |
+| `ISAMBARD_SBATCH_STORAGE_PATHS` | *(derived)* | Colon-separated paths to query (default: `/projects/<account-suffix>`) |
+| `ISAMBARD_SBATCH_STORAGE_WARN_PCT` | `90` | Append "nearly full" to entries at or above this percentage |
 
 ### Examples
 
@@ -223,6 +226,49 @@ ISAMBARD_SBATCH_DRY_RUN=1 isambard_sbatch --nodes=4 config.sbatch
 - Per-submission: `ISAMBARD_SBATCH_DISABLED=1 isambard_sbatch ...` bypasses the wrapper entirely.
 - Use a local log: `export ISAMBARD_SBATCH_BAD_NODES_FILE=~/.my_bad_nodes.log`.
 - Shorten the TTL: `export ISAMBARD_SBATCH_BAD_NODES_TTL=3600` (1 hour).
+
+## Project Storage Quotas
+
+Every submission also prints how much project storage is left. Long-running jobs that write checkpoints or evaluation artefacts are easy to start when the project is already near its 200 TiB cap; the summary makes that visible at submission time so you don't discover it from a half-written checkpoint hours later.
+
+### How it works
+
+- On every submission the wrapper queries Lustre project quotas using the documented Isambard recipe ([docs](https://docs.isambard.ac.uk/user-documentation/information/system-storage/#checking-quotas)):
+  ```
+  lfs quota -p $(lfs project -d <DIR> | awk '{print $1}') <DIR>
+  ```
+- By default it queries `/projects/<account-suffix>` — derived from `ISAMBARD_SBATCH_ACCOUNT` (e.g., `brics.a5k` → `/projects/a5k`).
+- A line is added to the cluster summary on stderr:
+  ```
+    Storage: /projects/a5k  199.5T / 200.0T (99%)  files: 9.8M / 50.0M (19%) — nearly full
+  ```
+- Multiple paths render as a header plus indented entries. Paths that aren't on Lustre, lack a project ID, or have no quota set are silently skipped.
+- The "nearly full" tag fires at `ISAMBARD_SBATCH_STORAGE_WARN_PCT` (default 90%).
+- Failures never block submission: a missing `lfs` binary, an NFS path, or a parse error all result in the line being omitted.
+
+### Standalone check
+
+```bash
+isambard_sbatch --storage
+# /projects/a5k  199.5T / 200.0T (99%)  files: 9.8M / 50.0M (19%) — nearly full
+```
+
+The output goes to stdout so it's easy to pipe or capture.
+
+### Querying multiple filesystems
+
+Override the path list with a colon-separated string:
+
+```bash
+export ISAMBARD_SBATCH_STORAGE_PATHS="/projects/a5k:/scratch/a5k/$USER.a5k"
+```
+
+This is useful for users who also want a scratch quota check on every submission. The home directory on Isambard-AI Phase 2 is NFS, not Lustre, and is silently skipped — query it with `du -xsh $HOME` instead, per the Isambard docs.
+
+### Opt out
+
+- Per-submission: `ISAMBARD_SBATCH_STORAGE_DISABLED=1 isambard_sbatch ...`
+- Persistent: `export ISAMBARD_SBATCH_STORAGE_DISABLED=1` in your `.bashrc`.
 
 ## Check Mode (`--check`)
 
@@ -367,6 +413,7 @@ The test suite includes:
 - Bad-node exclusion: merges with user-supplied `--exclude`; preserves SLURM bracket expressions
 - Bad-node exclusion: active under `FORCE`, skipped under `DISABLED` and `--check`
 - Bad-node CRUD: create (`--mark-bad`), read (`--list-bad`), update (`--update-bad`), delete (`--unmark-bad`), prune (`--prune-bad`) — including end-to-end roundtrip through the dispatch
+- Storage quotas: KB/count formatters, percentage helper, default-path derivation, entry rendering with/without quota set, "nearly full" threshold; integration tests assert the summary line, `STORAGE_DISABLED=1` opt-out, custom paths, and the `--storage` subcommand
 
 ## Troubleshooting
 
