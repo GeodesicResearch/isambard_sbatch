@@ -674,13 +674,20 @@ bad_nodes_inject_exclude() {
         done
     fi
 
+    # Emit --exclude FIRST, before the passthrough args. sbatch only honours
+    # options that precede the batch-script path; appending after new_args put
+    # --exclude in the script's argv whenever a script path was present, so
+    # SLURM silently ignored the exclusion (observed: job submitted with
+    # --exclude, scontrol showed ExcNodeList=(null), a bad-listed node was
+    # allocated). Emitting it first is always safe: option order among sbatch
+    # options is irrelevant, and the script path only ever comes later.
+    if [[ -n "$merged" ]]; then
+        printf '%s\0' "--exclude=$merged"
+    fi
     local a
     for a in "${new_args[@]}"; do
         printf '%s\0' "$a"
     done
-    if [[ -n "$merged" ]]; then
-        printf '%s\0' "--exclude=$merged"
-    fi
     return 0
 }
 
