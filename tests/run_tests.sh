@@ -740,23 +740,23 @@ assert_eq "empty log + user --exclude: argv unchanged" "--exclude=foo|--nodes=1"
 now=$(date +%s)
 printf '%s\tnid000001\tfresh\talice\n' "$now" > "$BAD_NODES_FILE"
 result=$(inject_out --nodes=1 --wrap="hostname")
-assert_eq "one bad node + no --exclude" "--nodes=1|--wrap=hostname|--exclude=nid000001" "$result"
+assert_eq "one bad node + no --exclude" "--exclude=nid000001|--nodes=1|--wrap=hostname" "$result"
 
 # Fresh entry + user --exclude=X → merged
 result=$(inject_out --exclude=nid999 --nodes=1)
-assert_eq "bad + user --exclude=X" "--nodes=1|--exclude=nid000001,nid999" "$result"
+assert_eq "bad + user --exclude=X" "--exclude=nid000001,nid999|--nodes=1" "$result"
 
 # Fresh entry + user --exclude X (space form) → merged
 result=$(inject_out --exclude nid999 --nodes=1)
-assert_eq "bad + user --exclude X (space)" "--nodes=1|--exclude=nid000001,nid999" "$result"
+assert_eq "bad + user --exclude X (space)" "--exclude=nid000001,nid999|--nodes=1" "$result"
 
 # Fresh entry + user -x X → merged
 result=$(inject_out -x nid999 --nodes=1)
-assert_eq "bad + user -x X" "--nodes=1|--exclude=nid000001,nid999" "$result"
+assert_eq "bad + user -x X" "--exclude=nid000001,nid999|--nodes=1" "$result"
 
 # Two separate user --exclude args → both preserved in merged list
 result=$(inject_out --exclude=nid998 --exclude=nid999 --nodes=1)
-assert_eq "two user --exclude args merged" "--nodes=1|--exclude=nid000001,nid998,nid999" "$result"
+assert_eq "two user --exclude args merged" "--exclude=nid000001,nid998,nid999|--nodes=1" "$result"
 
 # Multiple bad nodes → all in --exclude
 {
@@ -776,30 +776,32 @@ assert_eq "all-expired: no --exclude injected" "--nodes=1|--wrap=hostname" "$res
 # Bracket expression in user --exclude preserved (not split on comma)
 printf '%s\tnid000001\t-\talice\n' "$now" > "$BAD_NODES_FILE"
 result=$(inject_out --exclude="nid[100,200]" --nodes=1)
-assert_eq "bracket expression preserved" "--nodes=1|--exclude=nid000001,nid[100,200]" "$result"
+assert_eq "bracket expression preserved" "--exclude=nid000001,nid[100,200]|--nodes=1" "$result"
 
 # -x=VALUE form (short option with =)
 result=$(inject_out -x=nid999 --nodes=1)
-assert_eq "-x=VALUE form parsed" "--nodes=1|--exclude=nid000001,nid999" "$result"
+assert_eq "-x=VALUE form parsed" "--exclude=nid000001,nid999|--nodes=1" "$result"
 
 # -xVALUE attached form (short option with no separator)
 result=$(inject_out -xnid999 --nodes=1)
-assert_eq "-xNODE attached form parsed" "--nodes=1|--exclude=nid000001,nid999" "$result"
+assert_eq "-xNODE attached form parsed" "--exclude=nid000001,nid999|--nodes=1" "$result"
 
-# Order preservation: other args keep their position; --exclude goes to end
+# Order preservation: other args keep their position; --exclude goes FIRST
+# (sbatch only honours options before the batch-script path).
 result=$(inject_out --nodes=1 --wrap=cmd --time=01:00:00)
-assert_eq "non-exclude args keep order, --exclude appended" \
-    "--nodes=1|--wrap=cmd|--time=01:00:00|--exclude=nid000001" "$result"
+assert_eq "non-exclude args keep order, --exclude prepended" \
+    "--exclude=nid000001|--nodes=1|--wrap=cmd|--time=01:00:00" "$result"
 
-# Positional script file is preserved
+# Positional script file is preserved AND --exclude lands before it — appending
+# after the script path put --exclude in the script's argv, so SLURM ignored it.
 result=$(inject_out --nodes=1 myscript.sbatch arg1 arg2)
-assert_eq "positional script + trailing args preserved" \
-    "--nodes=1|myscript.sbatch|arg1|arg2|--exclude=nid000001" "$result"
+assert_eq "positional script + trailing args preserved, --exclude before script" \
+    "--exclude=nid000001|--nodes=1|myscript.sbatch|arg1|arg2" "$result"
 
-# User --exclude anywhere in argv gets removed and re-added at end
+# User --exclude anywhere in argv gets removed and re-emitted first
 result=$(inject_out --nodes=1 --exclude=nid999 --wrap=cmd)
-assert_eq "--exclude removed from middle, re-appended at end" \
-    "--nodes=1|--wrap=cmd|--exclude=nid000001,nid999" "$result"
+assert_eq "--exclude removed from middle, re-emitted first" \
+    "--exclude=nid000001,nid999|--nodes=1|--wrap=cmd" "$result"
 
 # Many bad nodes → all joined in one --exclude
 rm -f "$BAD_NODES_FILE"
